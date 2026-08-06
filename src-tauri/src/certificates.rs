@@ -68,6 +68,9 @@ try {{
         run_powershell(&script).map(|_| ())
     }
 
+    /// 删除走物理存储 `Root\.Default`（即 HKCU 注册表里的那份），而不是逻辑
+    /// `Root` 存储。逻辑存储由「受保护的根存储」提供程序接管，任何增删都会弹出
+    /// 系统确认框；物理存储不经过该提供程序，因此可以静默移除。
     fn remove_trusted(&self) -> Result<(), String> {
         let subject = utf8_base64(&format!("CN={CA_COMMON_NAME}"));
         let script = format!(
@@ -85,10 +88,18 @@ try {{
 }} finally {{
   $store.Close()
 }}
+$stuck = @()
 foreach ($thumbprint in $thumbprints) {{
-  & "$env:SystemRoot\System32\certutil.exe" -f -user -delstore Root $thumbprint | Out-Null
-  if ($LASTEXITCODE -ne 0) {{ throw "certutil 删除临时证书失败: $LASTEXITCODE" }}
+  & "$env:SystemRoot\System32\certutil.exe" -f -user -delstore 'Root\.Default' $thumbprint | Out-Null
+  if ($LASTEXITCODE -eq 0) {{ continue }}
+  $key = "HKCU:\Software\Microsoft\SystemCertificates\Root\Certificates\$thumbprint"
+  if (Test-Path -LiteralPath $key) {{
+    Remove-Item -LiteralPath $key -Recurse -Force
+  }} else {{
+    $stuck += $thumbprint
+  }}
 }}
+if ($stuck.Count -gt 0) {{ throw "临时证书未能从受信任根存储移除: $($stuck -join ', ')" }}
 "#
         );
         run_powershell(&script).map(|_| ())

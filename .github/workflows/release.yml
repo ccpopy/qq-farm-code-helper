@@ -1,0 +1,64 @@
+name: Release Windows packages
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build portable and setup packages
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+
+      - name: Install Tauri CLI
+        shell: pwsh
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build Windows executable and NSIS installer
+        shell: pwsh
+        run: cargo tauri build --bundles nsis
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = '${{ github.ref_name }}'
+          $metadata = cargo metadata --manifest-path src-tauri/Cargo.toml --format-version 1 --no-deps | ConvertFrom-Json
+          $targetDirectory = [IO.Path]::GetFullPath($metadata.target_directory)
+          $releaseDirectory = Join-Path $targetDirectory 'release'
+          $portableSource = Join-Path $releaseDirectory 'qq-farm-code-helper.exe'
+          $setupSource = Get-ChildItem -LiteralPath (Join-Path $releaseDirectory 'bundle\nsis') -Filter '*-setup.exe' | Select-Object -First 1
+
+          if (-not (Test-Path -LiteralPath $portableSource)) {
+            throw "Portable executable not found: $portableSource"
+          }
+          if ($null -eq $setupSource) {
+            throw 'NSIS setup package was not generated'
+          }
+
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item -LiteralPath $portableSource -Destination "dist\QQFarmCodeHelper-$tag-portable.exe"
+          Copy-Item -LiteralPath $setupSource.FullName -Destination "dist\QQFarmCodeHelper-$tag-setup.exe"
+          Get-FileHash -Algorithm SHA256 -Path 'dist\*.exe' | Format-Table -AutoSize
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*.exe

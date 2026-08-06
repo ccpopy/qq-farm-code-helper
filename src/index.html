@@ -8,11 +8,9 @@
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-  <header class="farm-banner reveal reveal-1">
-    <div class="cloud cloud-a"></div>
-    <div class="cloud cloud-b"></div>
-    <div class="sun" aria-hidden="true"></div>
-    <div class="field-line" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+  <div class="toast-viewport" id="toastViewport" aria-live="polite" aria-relevant="additions"></div>
+
+  <header class="farm-banner reveal reveal-1" id="appBanner">
     <div class="brand-row">
       <div class="brand-mark" aria-hidden="true">
         <svg viewBox="0 0 48 48" role="img">
@@ -21,145 +19,152 @@
           <path d="M24 24c1-8 7-12 15-11 0 8-5 14-15 14" />
         </svg>
       </div>
-      <div>
+      <div class="brand-copy">
         <p class="eyebrow">QQ FARM LOCAL TOOL</p>
         <h1>Code 获取助手</h1>
         <p class="brand-subtitle">在 Windows QQ 内安全获取农场登录 Code</p>
       </div>
-      <span class="version-chip">v0.1.0</span>
+      <span class="version-chip">v0.1.2</span>
     </div>
   </header>
 
-  <main class="app-shell">
-    <div class="workspace-grid">
-      <section class="card status-card reveal reveal-2" aria-live="polite">
-        <div class="status-heading">
-          <div class="status-signal" id="statusSignal"><span></span></div>
-          <div class="status-copy">
-            <p class="section-label">当前状态</p>
-            <h2 id="statusTitle">尚未启动</h2>
-            <p id="statusDetail">保存服务器设置后，启动一次性本地代理。</p>
-          </div>
-          <span class="status-code" id="statusCode">IDLE</span>
+  <div class="scroll-area" id="scrollArea">
+    <div class="scroll-viewport" id="scrollViewport">
+      <main class="app-shell">
+        <div class="workspace-grid">
+          <section class="card status-card reveal reveal-2" aria-live="polite">
+            <div class="status-heading">
+              <div class="status-signal" id="statusSignal"><span></span></div>
+              <div class="status-copy">
+                <p class="section-label">当前状态</p>
+                <h2 id="statusTitle">尚未启动</h2>
+                <p id="statusDetail">保存服务器设置后，启动一次性本地代理。</p>
+              </div>
+              <span class="status-code" id="statusCode">IDLE</span>
+            </div>
+
+            <ol class="stage-list" id="stageList">
+              <li data-stage="preparing_proxy">
+                <span class="stage-index">01</span>
+                <span><strong>启动代理</strong><small>临时证书</small></span>
+              </li>
+              <li data-stage="waiting_login">
+                <span class="stage-index">02</span>
+                <span><strong>等待登录</strong><small>打开农场</small></span>
+              </li>
+              <li data-stage="code_captured">
+                <span class="stage-index">03</span>
+                <span><strong>获取 Code</strong><small>阻止消耗</small></span>
+              </li>
+              <li data-stage="syncing">
+                <span class="stage-index">04</span>
+                <span><strong>同步服务器</strong><small>自动启动</small></span>
+              </li>
+            </ol>
+
+            <div class="action-row">
+              <button class="primary-action" id="startButton" type="button">
+                <span class="button-dot"></span>
+                <span id="startButtonText">启动获取</span>
+              </button>
+              <button class="secondary-action" id="stopButton" type="button" disabled>停止并恢复网络</button>
+              <button class="secondary-action hidden" id="copyButton" type="button">复制 Code</button>
+            </div>
+          </section>
+
+          <aside class="card profile-card reveal reveal-3" id="profileCard">
+            <div class="profile-topline">
+              <div>
+                <p class="section-label">REMOTE ACCOUNT</p>
+                <h2>同步账号</h2>
+              </div>
+              <span class="profile-state" id="profileState">等待同步</span>
+            </div>
+            <div class="profile-body">
+              <div class="avatar-shell">
+                <img id="profileAvatar" alt="QQ 农场账号头像" referrerpolicy="no-referrer">
+                <span id="profileFallback" aria-hidden="true">🌱</span>
+              </div>
+              <div class="profile-copy">
+                <strong id="profileName">同步后显示农场昵称</strong>
+                <span id="profileIdentity">QQ 号需在设置中选填</span>
+              </div>
+            </div>
+            <dl class="profile-meta">
+              <div><dt>农场 GID</dt><dd id="profileGid">—</dd></div>
+              <div><dt>OpenID</dt><dd id="profileOpenId">—</dd></div>
+            </dl>
+            <p class="profile-note" id="profileNote">正在确认当前 Windows QQ；Code 流量本身不包含真实 QQ 号。</p>
+          </aside>
         </div>
 
-        <ol class="stage-list" id="stageList">
-          <li data-stage="preparing_proxy">
-            <span class="stage-index">01</span>
-            <span><strong>启动代理</strong><small>临时证书</small></span>
-          </li>
-          <li data-stage="waiting_login">
-            <span class="stage-index">02</span>
-            <span><strong>等待登录</strong><small>打开农场</small></span>
-          </li>
-          <li data-stage="code_captured">
-            <span class="stage-index">03</span>
-            <span><strong>获取 Code</strong><small>阻止消耗</small></span>
-          </li>
-          <li data-stage="syncing">
-            <span class="stage-index">04</span>
-            <span><strong>同步服务器</strong><small>自动启动</small></span>
-          </li>
-        </ol>
+        <section class="card settings-card reveal reveal-4">
+          <div class="section-heading">
+            <div>
+              <p class="section-label">SERVER SYNC</p>
+              <h2>服务器设置</h2>
+            </div>
+            <label class="switch-field">
+              <span>获取后自动同步</span>
+              <input id="autoSync" type="checkbox" checked>
+              <i aria-hidden="true"></i>
+            </label>
+          </div>
 
-        <div class="action-row">
-          <button class="primary-action" id="startButton" type="button">
-            <span class="button-dot"></span>
-            <span id="startButtonText">启动获取</span>
-          </button>
-          <button class="secondary-action" id="stopButton" type="button" disabled>停止并恢复网络</button>
-          <button class="secondary-action hidden" id="copyButton" type="button">复制 Code</button>
-        </div>
-      </section>
+          <div class="form-grid">
+            <label class="field field-wide">
+              <span>服务器地址</span>
+              <input id="serverUrl" type="url" placeholder="https://farm.example.com" autocomplete="url">
+              <small>填写 qq-farm-bot 管理页面地址，不要带 /api 路径。</small>
+            </label>
 
-      <aside class="card profile-card reveal reveal-3" id="profileCard">
-        <div class="profile-topline">
-          <div>
-            <p class="section-label">REMOTE ACCOUNT</p>
-            <h2>同步账号</h2>
+            <label class="field field-wide">
+              <span>后台登录 Token</span>
+              <div class="secret-input">
+                <input id="serverToken" type="password" placeholder="留空则保留已安全保存的 Token" autocomplete="off">
+                <button id="toggleToken" type="button" aria-label="显示或隐藏 Token">显示</button>
+              </div>
+              <small id="tokenHint">Token 保存在 Windows 凭据管理器，不写入配置文件。</small>
+            </label>
+
+            <label class="field">
+              <span>账号备注</span>
+              <input id="accountName" type="text" maxlength="40" placeholder="Windows QQ">
+            </label>
+
+            <label class="field">
+              <span>QQ 号（前台确认）</span>
+              <div class="detect-input">
+                <input id="qqNumber" type="text" inputmode="numeric" maxlength="12" placeholder="等待前台确认" readonly>
+                <button id="detectQqButton" type="button">重新检测</button>
+              </div>
+              <small>每 2 秒检查 QQ 主界面并在 login.enc 中唯一匹配；不确定时立即清空 QQ 号。</small>
+            </label>
+
+            <label class="field">
+              <span>本地代理端口</span>
+              <input id="proxyPort" type="number" min="1024" max="65535" value="8899">
+            </label>
           </div>
-          <span class="profile-state" id="profileState">等待同步</span>
-        </div>
-        <div class="profile-body">
-          <div class="avatar-shell">
-            <img id="profileAvatar" alt="QQ 农场账号头像" referrerpolicy="no-referrer">
-            <span id="profileFallback" aria-hidden="true">🌱</span>
+
+          <div class="settings-actions">
+            <button class="text-action" id="testButton" type="button">测试连接</button>
+            <button class="text-action danger" id="cleanupButton" type="button">清理代理与证书</button>
+            <button class="save-action" id="saveButton" type="button">保存设置</button>
           </div>
-          <div class="profile-copy">
-            <strong id="profileName">同步后显示农场昵称</strong>
-            <span id="profileIdentity">QQ 号需在设置中选填</span>
-          </div>
-        </div>
-        <dl class="profile-meta">
-          <div><dt>农场 GID</dt><dd id="profileGid">—</dd></div>
-          <div><dt>OpenID</dt><dd id="profileOpenId">—</dd></div>
-        </dl>
-        <p class="profile-note">昵称、GID 与头像来自远程登录结果；Code 流量本身不包含真实 QQ 号。</p>
-      </aside>
+          <div class="inline-message" id="inlineMessage" role="status"></div>
+        </section>
+
+        <footer class="privacy-note reveal reveal-4">
+          <span>●</span>
+          <p>Code 只保存在内存中；结束后自动恢复系统代理并移除临时证书。</p>
+        </footer>
+      </main>
     </div>
-
-    <section class="card settings-card reveal reveal-4">
-      <div class="section-heading">
-        <div>
-          <p class="section-label">SERVER SYNC</p>
-          <h2>服务器设置</h2>
-        </div>
-        <label class="switch-field">
-          <span>获取后自动同步</span>
-          <input id="autoSync" type="checkbox" checked>
-          <i aria-hidden="true"></i>
-        </label>
-      </div>
-
-      <div class="form-grid">
-        <label class="field field-wide">
-          <span>服务器地址</span>
-          <input id="serverUrl" type="url" placeholder="https://farm.example.com" autocomplete="url">
-          <small>填写 qq-farm-bot 管理页面地址，不要带 /api 路径。</small>
-        </label>
-
-        <label class="field field-wide">
-          <span>后台登录 Token</span>
-          <div class="secret-input">
-            <input id="serverToken" type="password" placeholder="留空则保留已安全保存的 Token" autocomplete="off">
-            <button id="toggleToken" type="button" aria-label="显示或隐藏 Token">显示</button>
-          </div>
-          <small id="tokenHint">Token 保存在 Windows 凭据管理器，不写入配置文件。</small>
-        </label>
-
-        <label class="field">
-          <span>账号备注</span>
-          <input id="accountName" type="text" maxlength="40" placeholder="Windows QQ">
-        </label>
-
-        <label class="field">
-          <span>QQ 号（选填）</span>
-          <div class="detect-input">
-            <input id="qqNumber" type="text" inputmode="numeric" maxlength="12" placeholder="自动读取当前 QQ">
-            <button id="detectQqButton" type="button">重新检测</button>
-          </div>
-          <small>只读 QQNT 本地登录配置，不读取聊天内容。</small>
-        </label>
-
-        <label class="field">
-          <span>本地代理端口</span>
-          <input id="proxyPort" type="number" min="1024" max="65535" value="8899">
-        </label>
-      </div>
-
-      <div class="settings-actions">
-        <button class="text-action" id="testButton" type="button">测试连接</button>
-        <button class="text-action danger" id="cleanupButton" type="button">清理代理与证书</button>
-        <button class="save-action" id="saveButton" type="button">保存设置</button>
-      </div>
-      <div class="inline-message" id="inlineMessage" role="status"></div>
-    </section>
-
-    <footer class="privacy-note reveal reveal-4">
-      <span>●</span>
-      <p>Code 只保存在内存中；结束后自动恢复系统代理并移除临时证书。</p>
-    </footer>
-  </main>
+    <div class="scroll-bar" id="scrollBar" aria-hidden="true">
+      <div class="scroll-thumb" id="scrollThumb"></div>
+    </div>
+  </div>
   <script src="./app.js"></script>
 </body>
 </html>

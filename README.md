@@ -4,9 +4,16 @@
 
 获取后可以：
 
-- 只读 Windows QQNT 的当前登录配置，识别当前 QQ 号、昵称和头像；
+- 读取 Windows QQ 主界面当前昵称，并只读 QQNT 登录列表来唯一匹配 QQ 号和头像；
 - 自动调用 `qq-farm-bot` 的 `POST /api/accounts` 新增 QQ 账号；
 - 或者仅保存在内存中，由用户点击复制。
+
+## 参考项目与关系说明
+
+- 参考并配套使用：[liyangpengs/qq-farm-bot](https://github.com/liyangpengs/qq-farm-bot)
+- 本项目围绕该仓库提供的账号管理接口和 QQ 农场登录场景开发，用于在 Windows QQ 本地获取一次性 Code 并同步到服务器。
+- 本项目是独立的第三方辅助工具，不属于 `qq-farm-bot` 官方组件，不要求修改或覆盖原作者仓库代码。
+- 参考项目的代码、名称及相关权利归原作者所有；使用时请同时遵守对应仓库的许可说明和相关服务条款。
 
 ## 使用流程
 
@@ -14,17 +21,20 @@
 2. 在 `qq-farm-bot` 左侧边栏底部复制当前登录 Token，填入工具。
 3. 点击「测试连接」，确认 `/api/user/me` 可以正常返回当前用户。
 4. 保存设置并点击「启动获取」。
-5. **完全退出 Windows QQ**，重新打开 QQ，然后进入 QQ 农场。
+5. 代理启动后，再打开或登录 Windows QQ；若 QQ 已在运行，建议完全退出后重新打开。等待工具显示账号已确认，再进入 QQ 农场。
 6. 工具捕获 Code 后会立即恢复系统代理、移除临时根证书，再同步到服务器。
 
 QQ 农场窗口当次出现网络错误是预期现象：官方的 WebSocket 登录请求被本地工具主动阻断，避免一次性 Code 被官方客户端先消耗。
 
 ## QQ 身份识别
 
-- 工具读取 `%APPDATA%\QQ\auth\login.enc` 中 QQNT 当前账号的 `account`、`uin`、`nickName` 和 `faceUrl`，不会读取聊天数据库。
-- 启动时、点击获取前和捕获 Code 后都会重新检测；如果是在代理启动后扫码登录一个新 QQ，最终同步时会优先采用新账号。
-- 若 QQ 登录列表尚未刷新，只要 `account` 已写入，仍会同步 QQ 号并使用 qlogo 头像回退。
-- 若本地检测完全不可用，Code 仍可正常同步；昵称、头像、农场 GID 与 OpenID 会由更新后的 `qq-farm-bot` 在登录成功后回填，QQ 号可手工填写。
+- 工具通过 Windows UI Automation 读取新版 QQ 主窗口左上角当前昵称，再与 `%APPDATA%\QQ\auth\login.enc` 的 `uin`、`nickName` 和 `faceUrl` 做唯一匹配，不读取聊天数据库。
+- `isUserLogin` 和最近活动分区可能指向后台主会话，不能代表界面当前切换的账号，因此不再用于自动绑定。
+- 界面每 2 秒自动检测一次切号，并要求连续两次结果一致；切换过程中、昵称同名、主窗口不可读或登录列表尚未刷新时会立即清空旧身份。
+- 启动后等待农场登录期间，后端会持续检测 QQ；新账号连续稳定后会自动替换锁定身份，因此可以先启动获取、再切换目标 QQ、最后进入农场。
+- 捕获 Code 后还会再次确认；若捕获前后的账号仍不一致，则停止自动同步并保留 Code。
+- 启用自动同步时，启动前无需登录 QQ，可以先启动代理再登录；但捕获 Code 前必须稳定确认 QQ，否则 Code 只保留在内存中且不会请求服务器。若获取期间发生切号，同样停止同步，从而避免创建默认的无 QQ 号账号。
+- 若本地检测不可用，关闭自动同步后仍可只获取 Code，但工具不会自动在服务器创建账号。
 - 农场 WebSocket 请求本身不包含 UIN、昵称或头像，身份信息不是从 Code 中解码得到的。
 
 ## Token 说明
@@ -33,6 +43,21 @@ QQ 农场窗口当次出现网络错误是预期现象：官方的 WebSocket 登
 - 工具通过 `x-admin-token` 请求头访问服务器。
 - Token 保存在 Windows 凭据管理器，不会写入 `settings.json`。
 - `qq-farm-bot` 服务器重启或 Token 失效时，需要从网页重新登录并复制新 Token。
+
+## 配置与运行文件位置
+
+- `settings.json`、`system-proxy-backup.json`、`temporary-ca.cer` 和 `traffic-diagnostics.log` 均存放在应用 EXE 所在目录，不使用 `%APPDATA%` 默认目录。
+- 首次运行新版时，会自动把旧版本位于 `%APPDATA%\io.github.ccpopy.qqfarmcodehelper` 的上述文件迁移到 EXE 所在目录。
+- 便携版可直接放到任意有写入权限的目录；配置和恢复文件会跟随 EXE，移动时可一并迁移。
+- 安装版同样将运行文件放在安装目录。若自行选择安装位置，请确保当前 Windows 用户对该目录具有写入权限。
+- 服务器 Token 仍由 Windows 凭据管理器加密保存，不会以明文文件放在应用目录。
+
+## GitHub Release
+
+推送 `v*` 格式的 Tag（例如 `v0.1.2`）会触发 GitHub Actions，在对应 Release 中自动提供：
+
+- `QQFarmCodeHelper-<tag>-portable.exe`：单文件便携版；
+- `QQFarmCodeHelper-<tag>-setup.exe`：Windows NSIS 安装包。
 
 ## 安全边界
 

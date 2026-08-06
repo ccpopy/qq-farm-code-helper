@@ -1,9 +1,11 @@
 [package]
 name = "qq-farm-code-helper"
-version = "0.1.0"
+version = "0.1.2"
 description = "Windows QQ 农场一次性 Code 本地获取助手"
 authors = ["ccpopy"]
 edition = "2024"
+homepage = "https://github.com/ccpopy/qq-farm-code-helper"
+repository = "https://github.com/ccpopy/qq-farm-code-helper"
 
 [build-dependencies]
 tauri-build = { version = "2.5.6", features = [] }
@@ -18,11 +20,21 @@ rustls-pki-types = "1.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 tauri = { version = "2.11.5", features = [] }
+tauri-plugin-single-instance = "2"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7.16", features = ["rt"] }
 url = "2.5.7"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_Threading",
+  "Win32_UI_Accessibility",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 codegen-units = 1

@@ -103,8 +103,9 @@ impl ServerClient {
         token: &str,
         input: SyncAccountInput<'_>,
     ) -> Result<AccountProfile, String> {
+        let qq_number = validated_qq_number(input.qq_number)?;
         let endpoint = endpoint(server_url, "/api/accounts")?;
-        let fallback_avatar = qq_avatar_url(input.qq_number);
+        let fallback_avatar = qq_avatar_url(qq_number);
         let avatar = if input.avatar_url.trim().is_empty() {
             fallback_avatar.as_str()
         } else {
@@ -115,8 +116,8 @@ impl ServerClient {
             code: input.code,
             platform: "qq",
             login_type: "manual",
-            uin: input.qq_number,
-            qq: input.qq_number,
+            uin: qq_number,
+            qq: qq_number,
             nick: input.nickname,
             avatar,
         };
@@ -172,8 +173,17 @@ impl ServerClient {
     }
 }
 
+fn validated_qq_number(value: &str) -> Result<&str, String> {
+    let value = value.trim();
+    if (5..=12).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        Ok(value)
+    } else {
+        Err("拒绝同步：当前 QQ 号未通过本地身份确认，服务器不会创建账号".to_owned())
+    }
+}
+
 impl AccountProfile {
-    fn has_game_identity(&self) -> bool {
+    pub(crate) fn has_game_identity(&self) -> bool {
         !self.nickname.is_empty() && (!self.gid.is_empty() || !self.open_id.is_empty())
     }
 }
@@ -337,6 +347,25 @@ mod tests {
         assert!(request.contains("\"uin\":\"12345678\""));
         assert!(request.contains("\"nick\":\"本机昵称\""));
         assert!(request.contains("example.com/local-avatar.png"));
+    }
+
+    #[tokio::test]
+    async fn rejects_sync_without_a_confirmed_qq_number() {
+        let result = ServerClient::new()
+            .unwrap()
+            .sync_code(
+                "http://127.0.0.1:9",
+                "synthetic-token",
+                SyncAccountInput {
+                    account_name: "Windows QQ",
+                    qq_number: "",
+                    nickname: "未确认账号",
+                    avatar_url: "",
+                    code: "testcode0123456789abcdef0123456789",
+                },
+            )
+            .await;
+        assert!(result.unwrap_err().contains("服务器不会创建账号"));
     }
 
     async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {

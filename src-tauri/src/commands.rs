@@ -75,6 +75,6 @@ pub async fn get_captured_code(core: State<'_, Arc<AppCore>>) -> Result<String, 
 }
 
 #[tauri::command]
-pub fn detect_local_qq() -> Result<LocalQqIdentity, String> {
-    qq_identity::detect()
+pub async fn detect_local_qq() -> Result<LocalQqIdentity, String> {
+    qq_identity::detect_stable_async().await
 }

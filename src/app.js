@@ -15,6 +15,7 @@ const elements = {
   profileGid: document.querySelector('#profileGid'),
   profileIdentity: document.querySelector('#profileIdentity'),
   profileName: document.querySelector('#profileName'),
+  profileNote: document.querySelector('#profileNote'),
   profileOpenId: document.querySelector('#profileOpenId'),
   profileState: document.querySelector('#profileState'),
   saveButton: document.querySelector('#saveButton'),
@@ -31,10 +32,103 @@ const elements = {
   testButton: document.querySelector('#testButton'),
   toggleToken: document.querySelector('#toggleToken'),
   tokenHint: document.querySelector('#tokenHint'),
+  toastViewport: document.querySelector('#toastViewport'),
 }
 
 const stageOrder = ['preparing_proxy', 'waiting_login', 'code_captured', 'syncing']
 const activePhases = new Set(['preparing_proxy', 'waiting_login', 'code_captured', 'syncing'])
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
+const identityPollInterval = 2000
+
+let currentPhase = 'idle'
+let currentLocalIdentity = null
+let currentIdentityError = ''
+let currentRemoteProfile = null
+let hasIdentityResult = false
+let identityRequest = null
+let toastSequence = 0
+
+const toastIcons = {
+  success: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>',
+  warning: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2.8 19h18.4L12 3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
+  error: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6"/><path d="m15 9-6 6"/></svg>',
+  info: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg>',
+}
+const toastDurations = { success: 4200, info: 5200, warning: 8000, error: 9000 }
+const activeToasts = new Map()
+
+function setupScrollArea() {
+  const area = document.querySelector('#scrollArea')
+  const viewport = document.querySelector('#scrollViewport')
+  const bar = document.querySelector('#scrollBar')
+  const thumb = document.querySelector('#scrollThumb')
+  const banner = document.querySelector('#appBanner')
+  const minThumbHeight = 28
+  let idleTimer = 0
+  let grabOffset = 0
+
+  const trackHeight = () => bar.clientHeight - 2
+  const overflow = () => viewport.scrollHeight - viewport.clientHeight
+
+  function sync() {
+    const distance = overflow()
+    area.classList.toggle('scrollable', distance > 1)
+    banner.classList.toggle('raised', viewport.scrollTop > 2)
+    if (distance <= 1)
+      return
+    const height = Math.max(minThumbHeight, Math.round(trackHeight() * viewport.clientHeight / viewport.scrollHeight))
+    thumb.style.height = `${height}px`
+    thumb.style.transform = `translateY(${Math.round((trackHeight() - height) * viewport.scrollTop / distance)}px)`
+  }
+
+  function scrollToRatio(ratio) {
+    viewport.scrollTop = Math.min(Math.max(ratio, 0), 1) * overflow()
+  }
+
+  viewport.addEventListener('scroll', () => {
+    sync()
+    area.classList.add('scrolling')
+    clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => area.classList.remove('scrolling'), 700)
+  }, { passive: true })
+
+  thumb.addEventListener('pointerdown', (event) => {
+    event.preventDefault()
+    thumb.setPointerCapture(event.pointerId)
+    grabOffset = event.clientY - thumb.getBoundingClientRect().top
+    area.classList.add('dragging')
+  })
+  thumb.addEventListener('pointermove', (event) => {
+    if (!area.classList.contains('dragging'))
+      return
+    scrollToRatio((event.clientY - grabOffset - bar.getBoundingClientRect().top - 1) / (trackHeight() - thumb.offsetHeight))
+  })
+  thumb.addEventListener('lostpointercapture', () => area.classList.remove('dragging'))
+
+  bar.addEventListener('pointerdown', (event) => {
+    if (event.target === thumb)
+      return
+    const page = viewport.clientHeight * 0.9
+    viewport.scrollBy({
+      top: event.clientY < thumb.getBoundingClientRect().top ? -page : page,
+      behavior: reducedMotion.matches ? 'auto' : 'smooth',
+    })
+  })
+
+  const observer = new ResizeObserver(sync)
+  observer.observe(viewport)
+  observer.observe(viewport.firstElementChild)
+  sync()
+
+  return {
+    reset() {
+      viewport.scrollTop = 0
+      sync()
+    },
+  }
+}
+
+const scrollArea = setupScrollArea()
 
 function settingsPayload() {
   return {
@@ -56,9 +150,106 @@ function setBusy(button, busy, busyText) {
   button.textContent = busy ? busyText : button.dataset.originalText
 }
 
-function showMessage(message, isError = false) {
+function toastDefaultTitle(type) {
+  return {
+    success: '操作成功',
+    warning: '需要注意',
+    error: '操作未完成',
+    info: '状态提示',
+  }[type] || '状态提示'
+}
+
+function dismissToast(id) {
+  const entry = activeToasts.get(id)
+  if (!entry || entry.closing)
+    return
+  entry.closing = true
+  window.clearTimeout(entry.timer)
+  entry.node.classList.remove('visible')
+  entry.node.classList.add('leaving')
+  activeToasts.delete(id)
+  window.setTimeout(() => entry.node.remove(), 220)
+}
+
+function scheduleToast(entry, duration) {
+  window.clearTimeout(entry.timer)
+  if (duration > 0)
+    entry.timer = window.setTimeout(() => dismissToast(entry.id), duration)
+}
+
+function showToast(message, { type = 'info', title, duration, id } = {}) {
+  if (!message)
+    return null
+  if (!toastIcons[type])
+    type = 'info'
+  const toastId = id || `toast-${++toastSequence}`
+  const timeout = duration ?? toastDurations[type]
+  const existing = activeToasts.get(toastId)
+  if (existing) {
+    existing.node.dataset.type = type
+    existing.node.setAttribute('role', type === 'error' || type === 'warning' ? 'alert' : 'status')
+    existing.icon.innerHTML = toastIcons[type]
+    existing.title.textContent = title || toastDefaultTitle(type)
+    existing.message.textContent = message
+    existing.node.classList.remove('refreshing')
+    void existing.node.offsetWidth
+    existing.node.classList.add('refreshing')
+    scheduleToast(existing, timeout)
+    return toastId
+  }
+
+  if (activeToasts.size >= 3)
+    dismissToast(activeToasts.keys().next().value)
+
+  const toast = document.createElement('article')
+  toast.className = 'app-toast'
+  toast.dataset.type = type
+  toast.setAttribute('role', type === 'error' || type === 'warning' ? 'alert' : 'status')
+
+  const icon = document.createElement('span')
+  icon.className = 'toast-icon'
+  icon.innerHTML = toastIcons[type]
+
+  const copy = document.createElement('div')
+  copy.className = 'toast-copy'
+  const titleElement = document.createElement('strong')
+  titleElement.textContent = title || toastDefaultTitle(type)
+  const messageElement = document.createElement('p')
+  messageElement.textContent = message
+  copy.append(titleElement, messageElement)
+
+  const closeButton = document.createElement('button')
+  closeButton.className = 'toast-close'
+  closeButton.type = 'button'
+  closeButton.setAttribute('aria-label', '关闭提示')
+  closeButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10"/><path d="m17 7-10 10"/></svg>'
+  closeButton.addEventListener('click', () => dismissToast(toastId))
+
+  toast.append(icon, copy, closeButton)
+  elements.toastViewport.append(toast)
+  const entry = {
+    closing: false,
+    icon,
+    id: toastId,
+    message: messageElement,
+    node: toast,
+    timer: 0,
+    title: titleElement,
+  }
+  activeToasts.set(toastId, entry)
+  toast.addEventListener('mouseenter', () => window.clearTimeout(entry.timer))
+  toast.addEventListener('mouseleave', () => scheduleToast(entry, Math.min(timeout, 2400)))
+  window.requestAnimationFrame(() => toast.classList.add('visible'))
+  scheduleToast(entry, timeout)
+  return toastId
+}
+
+function showMessage(message, { type = 'success', title, toast = true, duration, id } = {}) {
   elements.inlineMessage.textContent = message || ''
-  elements.inlineMessage.classList.toggle('error', isError)
+  elements.inlineMessage.classList.toggle('error', type === 'error')
+  elements.inlineMessage.classList.toggle('warning', type === 'warning')
+  if (message && toast)
+    showToast(message, { type, title, duration, id })
 }
 
 function fillSettings(data) {
@@ -73,8 +264,6 @@ function fillSettings(data) {
 }
 
 function renderProfile(profile) {
-  if (!profile)
-    return
   elements.profileState.textContent = profile.running ? '运行中' : '已同步'
   elements.profileState.classList.add('ready')
   elements.profileName.textContent = profile.nickname || profile.accountName || `远程账号 #${profile.accountId}`
@@ -85,26 +274,74 @@ function renderProfile(profile) {
   elements.profileOpenId.textContent = profile.openId
     ? `${profile.openId.slice(0, 8)}${profile.openId.length > 8 ? '…' : ''}`
     : '等待登录回填'
-
+  elements.profileNote.textContent = '昵称、GID 与头像来自远程登录结果；Code 流量本身不包含真实 QQ 号。'
   setProfileAvatar(profile.avatarUrl)
 }
 
+function clearProfileAvatar() {
+  elements.profileAvatar.removeAttribute('src')
+  elements.profileAvatar.classList.remove('visible')
+  elements.profileFallback.classList.remove('hidden')
+}
+
 function setProfileAvatar(avatarUrl) {
-  if (!avatarUrl)
-    return
-  elements.profileAvatar.src = avatarUrl
-  elements.profileAvatar.classList.add('visible')
-  elements.profileFallback.classList.add('hidden')
+  clearProfileAvatar()
+  if (avatarUrl) {
+    elements.profileAvatar.src = avatarUrl
+    elements.profileAvatar.classList.add('visible')
+    elements.profileFallback.classList.add('hidden')
+  }
 }
 
 function renderLocalIdentity(identity) {
-  elements.profileState.textContent = '本机已识别'
+  elements.profileState.textContent = '本机前台确认'
   elements.profileState.classList.add('ready')
   elements.profileName.textContent = identity.nickname || 'Windows QQ'
   elements.profileIdentity.textContent = `QQ ${identity.qqNumber}`
   elements.profileGid.textContent = '同步后回填'
   elements.profileOpenId.textContent = '同步后回填'
+  elements.profileNote.textContent = `已读取 QQ 主界面昵称“${identity.nickname || '未命名'}”，并在本地登录列表中唯一匹配。`
   setProfileAvatar(identity.avatarUrl)
+}
+
+function renderPendingIdentity() {
+  elements.qqNumber.value = ''
+  elements.profileState.textContent = '正在确认'
+  elements.profileState.classList.remove('ready')
+  elements.profileName.textContent = '正在读取当前 Windows QQ'
+  elements.profileIdentity.textContent = '不会沿用上一次的账号'
+  elements.profileGid.textContent = '—'
+  elements.profileOpenId.textContent = '—'
+  elements.profileNote.textContent = '请保持新版 QQ 主窗口打开，检测完成前不会绑定 QQ 号。'
+  clearProfileAvatar()
+}
+
+function renderUnconfirmedIdentity(error) {
+  elements.profileState.textContent = '未确认'
+  elements.profileState.classList.remove('ready')
+  elements.profileName.textContent = '未确认当前 Windows QQ'
+  elements.profileIdentity.textContent = '本次不会绑定 QQ 号'
+  elements.profileGid.textContent = '—'
+  elements.profileOpenId.textContent = '—'
+  elements.profileNote.textContent = error || '当前账号无法唯一确认，已清除旧身份显示。'
+  clearProfileAvatar()
+}
+
+function renderAccountCard() {
+  if (!hasIdentityResult) {
+    renderPendingIdentity()
+    return
+  }
+  if (!currentLocalIdentity) {
+    renderUnconfirmedIdentity(currentIdentityError)
+    return
+  }
+  const remoteMatchesLocal = currentRemoteProfile?.qqNumber
+    && currentRemoteProfile.qqNumber === currentLocalIdentity.qqNumber
+  if (currentPhase === 'completed' && remoteMatchesLocal)
+    renderProfile(currentRemoteProfile)
+  else
+    renderLocalIdentity(currentLocalIdentity)
 }
 
 function updateStages(phase) {
@@ -116,19 +353,55 @@ function updateStages(phase) {
   })
 }
 
-function renderStatus(status) {
+function showStatusToast(status) {
+  if (status.phase === 'waiting_login') {
+    const confirmed = status.title === 'QQ 已确认，等待农场登录'
+    const switched = status.detail?.includes('切换')
+    showToast(status.detail || status.title, {
+      type: confirmed ? (switched ? 'warning' : 'success') : 'warning',
+      duration: confirmed ? 6000 : 9000,
+      id: 'capture-status-waiting_login',
+      title: status.title,
+    })
+    return
+  }
+  const config = {
+    code_captured: { type: 'success', duration: 6500 },
+    syncing: { type: 'info', duration: 5200 },
+    completed: { type: 'success', duration: 6000 },
+    stopped: { type: 'info', duration: 4200 },
+    identity_changed: { type: 'warning', duration: 9000 },
+    error: { type: 'error', duration: 10000 },
+  }[status.phase]
+  if (!config)
+    return
+  showToast(status.detail || status.title, {
+    ...config,
+    id: `capture-status-${status.phase}`,
+    title: status.title,
+  })
+}
+
+function renderStatus(status, { notify = false } = {}) {
   const phase = status.phase || 'idle'
+  const previousPhase = currentPhase
+  const previousDetail = elements.statusDetail.textContent
+  currentPhase = phase
+  currentRemoteProfile = status.profile || null
   const isActive = activePhases.has(phase)
+  const isError = phase === 'error' || phase === 'identity_changed'
   elements.statusTitle.textContent = status.title
   elements.statusDetail.textContent = status.detail
   elements.statusCode.textContent = phase.replaceAll('_', ' ').toUpperCase()
-  elements.statusSignal.className = `status-signal ${isActive ? 'active' : ''} ${phase === 'completed' ? 'success' : ''} ${phase === 'error' ? 'error' : ''}`
+  elements.statusSignal.className = `status-signal ${isActive ? 'active' : ''} ${phase === 'completed' ? 'success' : ''} ${isError ? 'error' : ''}`
   elements.startButton.disabled = isActive
   elements.startButtonText.textContent = isActive ? '正在获取…' : '启动获取'
   elements.stopButton.disabled = !isActive
   elements.copyButton.classList.toggle('hidden', !status.code_available)
   updateStages(phase)
-  renderProfile(status.profile)
+  renderAccountCard()
+  if (notify && (phase !== previousPhase || status.detail !== previousDetail))
+    showStatusToast(status)
 }
 
 async function saveSettings() {
@@ -138,10 +411,10 @@ async function saveSettings() {
     const result = await invoke('save_settings', settingsPayload())
     fillSettings(result)
     elements.serverToken.value = ''
-    showMessage('设置已保存。')
+    showMessage('服务器地址、同步选项和本地设置均已更新。', { type: 'success', title: '设置已保存' })
   }
   catch (error) {
-    showMessage(String(error), true)
+    showMessage(String(error), { type: 'error', title: '保存设置失败' })
   }
   finally {
     setBusy(elements.saveButton, false)
@@ -157,10 +430,10 @@ async function testConnection() {
       serverUrl: payload.settings.server_url,
       token: payload.token,
     })
-    showMessage(`连接成功：${result.username} (${result.role})`)
+    showMessage(`已连接到服务器，当前用户：${result.username}（${result.role}）。`, { type: 'success', title: '服务器连接正常' })
   }
   catch (error) {
-    showMessage(String(error), true)
+    showMessage(String(error), { type: 'error', title: '服务器连接失败' })
   }
   finally {
     setBusy(elements.testButton, false)
@@ -170,13 +443,13 @@ async function testConnection() {
 async function startCapture() {
   showMessage('')
   try {
-    await detectLocalQq({ overwrite: true, notify: false })
     await invoke('save_settings', settingsPayload())
     elements.serverToken.value = ''
     await invoke('start_capture')
+    dismissToast('identity-unavailable')
   }
   catch (error) {
-    showMessage(String(error), true)
+    showMessage(String(error), { type: 'error', title: '无法启动获取', duration: 10000 })
   }
 }
 
@@ -185,7 +458,7 @@ async function stopCapture() {
     await invoke('stop_capture')
   }
   catch (error) {
-    showMessage(String(error), true)
+    showMessage(String(error), { type: 'error', title: '停止失败' })
   }
 }
 
@@ -193,10 +466,10 @@ async function cleanupNetwork() {
   setBusy(elements.cleanupButton, true, '清理中…')
   try {
     await invoke('cleanup_network')
-    showMessage('系统代理与临时证书已清理。')
+    showMessage('系统代理与临时证书均已恢复并清理。', { type: 'success', title: '网络环境已清理' })
   }
   catch (error) {
-    showMessage(String(error), true)
+    showMessage(String(error), { type: 'error', title: '网络清理失败' })
   }
   finally {
     setBusy(elements.cleanupButton, false)
@@ -207,10 +480,10 @@ async function copyCode() {
   try {
     const code = await invoke('get_captured_code')
     await navigator.clipboard.writeText(code)
-    showMessage('Code 已复制，请尽快使用。')
+    showMessage('Code 已复制到剪贴板，请尽快使用。', { type: 'success', title: '复制成功' })
   }
   catch (error) {
-    showMessage(String(error), true)
+    showMessage(String(error), { type: 'error', title: '复制 Code 失败' })
   }
 }
 
@@ -218,18 +491,31 @@ async function detectLocalQq({ overwrite = true, notify = true, render = true } 
   if (notify)
     setBusy(elements.detectQqButton, true, '检测中…')
   try {
-    const identity = await invoke('detect_local_qq')
+    if (!identityRequest)
+      identityRequest = invoke('detect_local_qq').finally(() => { identityRequest = null })
+    const identity = await identityRequest
+    hasIdentityResult = true
+    currentLocalIdentity = identity
+    currentIdentityError = ''
+    dismissToast('identity-unavailable')
     if (overwrite || !elements.qqNumber.value.trim())
       elements.qqNumber.value = identity.qqNumber
     if (render)
-      renderLocalIdentity(identity)
+      renderAccountCard()
     if (notify)
-      showMessage(`已识别当前 Windows QQ：${identity.nickname || identity.qqNumber}`)
+      showMessage(`当前账号：${identity.nickname || '未命名'}（QQ ${identity.qqNumber}）。`, { type: 'success', title: '已确认 Windows QQ' })
     return identity
   }
   catch (error) {
+    hasIdentityResult = true
+    currentLocalIdentity = null
+    currentIdentityError = String(error)
+    if (overwrite)
+      elements.qqNumber.value = ''
+    if (render)
+      renderAccountCard()
     if (notify)
-      showMessage(String(error), true)
+      showMessage(String(error), { type: 'warning', title: '未检测到可确认的 QQ', duration: 9000, id: 'identity-unavailable' })
     return null
   }
   finally {
@@ -238,15 +524,57 @@ async function detectLocalQq({ overwrite = true, notify = true, render = true } 
   }
 }
 
+function startIdentityMonitor() {
+  const refresh = async () => {
+    if (document.hidden)
+      return
+    const previous = currentLocalIdentity
+    const identity = await detectLocalQq({ overwrite: true, notify: false })
+    if (previous && !identity) {
+      showToast(currentIdentityError || '请保持新版 QQ 主窗口打开。', {
+        type: 'warning',
+        title: 'QQ 主程序已无法确认',
+        duration: 9000,
+        id: 'identity-state',
+      })
+    }
+    else if (!previous && identity) {
+      showToast(`当前账号：${identity.nickname || '未命名'}（QQ ${identity.qqNumber}）。`, {
+        type: 'success',
+        title: '已检测到 Windows QQ',
+        id: 'identity-state',
+      })
+    }
+    else if (previous && identity && previous.qqNumber !== identity.qqNumber) {
+      showToast(`已从 QQ ${previous.qqNumber} 切换为 ${identity.nickname || '新账号'}（QQ ${identity.qqNumber}）。`, {
+        type: 'warning',
+        title: '检测到 QQ 账号切换',
+        duration: 8000,
+        id: 'identity-state',
+      })
+    }
+  }
+  window.setInterval(() => { void refresh() }, identityPollInterval)
+  window.addEventListener('focus', () => { void refresh() })
+  document.addEventListener('visibilitychange', () => { void refresh() })
+}
+
 async function bootstrap() {
-  window.scrollTo(0, 0)
+  scrollArea.reset()
   const data = await invoke('get_bootstrap')
   fillSettings(data)
   renderStatus(data.status)
-  await detectLocalQq({ overwrite: false, notify: false, render: !data.status.profile })
+  const initialIdentity = await detectLocalQq({ overwrite: true, notify: false })
+  if (!initialIdentity) {
+    showMessage(`${currentIdentityError || '尚未检测到 Windows QQ。'} 你仍可先点击“启动获取”启动代理，随后再登录 QQ。`, {
+      type: 'warning',
+      toast: false,
+    })
+  }
   if (data.startup_warning)
-    showMessage(data.startup_warning, true)
-  await listen('capture-status', event => renderStatus(event.payload))
+    showMessage(data.startup_warning, { type: 'error', title: '启动时发现网络恢复问题', duration: 10000 })
+  await listen('capture-status', event => renderStatus(event.payload, { notify: true }))
+  startIdentityMonitor()
 }
 
 elements.saveButton.addEventListener('click', saveSettings)
@@ -269,4 +597,4 @@ elements.profileAvatar.addEventListener('error', () => {
   elements.profileFallback.classList.remove('hidden')
 })
 
-bootstrap().catch(error => showMessage(String(error), true))
+bootstrap().catch(error => showMessage(String(error), { type: 'error', title: '应用初始化失败', duration: 10000 }))
