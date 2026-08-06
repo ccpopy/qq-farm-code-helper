@@ -90,4 +90,4 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-代理集成测试会在本机启动随机端口，通过模拟 HTTPS 代理请求验证 Code 提取和 451 阻断，不会连接腾讯上游。
+代理集成测试会在本机启动随机端口，通过模拟 HTTPS 代理请求验证 Code 提取和 451 阻断，不会连接上游。
