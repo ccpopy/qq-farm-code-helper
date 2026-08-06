@@ -1,6 +1,13 @@
 use crate::certificates::TARGET_HOST;
 use rustls::ServerConfig;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional},
     net::{TcpListener, TcpStream},
@@ -25,6 +32,7 @@ pub async fn run(
     tls_config: Arc<ServerConfig>,
     cancellation: CancellationToken,
     captured: mpsc::Sender<String>,
+    diagnostics_path: Option<PathBuf>,
 ) {
     loop {
         let accepted = tokio::select! {
@@ -36,8 +44,11 @@ pub async fn run(
         };
         let tls_config = tls_config.clone();
         let captured = captured.clone();
+        let diagnostics_path = diagnostics_path.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_client(stream, peer, tls_config, captured).await {
+            if let Err(error) =
+                handle_client(stream, peer, tls_config, captured, diagnostics_path).await
+            {
                 eprintln!("proxy connection closed: {error}");
             }
         });
@@ -49,13 +60,14 @@ async fn handle_client(
     _peer: SocketAddr,
     tls_config: Arc<ServerConfig>,
     captured: mpsc::Sender<String>,
+    diagnostics_path: Option<PathBuf>,
 ) -> Result<(), String> {
     let headers = read_headers(&mut client).await?;
     let request = ParsedRequest::parse(&headers)?;
     if request.method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = parse_authority(&request.target)?;
         if host.eq_ignore_ascii_case(TARGET_HOST) && port == 443 {
-            return intercept_target(client, tls_config, captured).await;
+            return intercept_target(client, tls_config, captured, diagnostics_path).await;
         }
         return tunnel_connect(client, &host, port).await;
     }
@@ -66,6 +78,7 @@ async fn intercept_target(
     mut client: TcpStream,
     tls_config: Arc<ServerConfig>,
     captured: mpsc::Sender<String>,
+    diagnostics_path: Option<PathBuf>,
 ) -> Result<(), String> {
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -77,9 +90,84 @@ async fn intercept_target(
         .map_err(|error| format!("QQ TLS 握手失败: {error}"))?;
     let headers = read_headers(&mut tls).await?;
     let request = ParsedRequest::parse(&headers)?;
+    log_target_request_diagnostics(&headers, &request, diagnostics_path.as_deref());
     let code = extract_farm_code(&request.target, &request.host)?;
     let _ = captured.try_send(code);
     write_blocked_response(&mut tls).await
+}
+
+fn log_target_request_diagnostics(headers: &[u8], request: &ParsedRequest, path: Option<&Path>) {
+    let query = Url::parse(&format!("https://{TARGET_HOST}{}", request.target))
+        .ok()
+        .map(|url| {
+            url.query_pairs()
+                .map(|(name, value)| {
+                    let description = if name.eq_ignore_ascii_case("code") {
+                        format!("<redacted:{} chars>", value.len())
+                    } else if value.bytes().all(|byte| byte.is_ascii_digit()) {
+                        format!("<numeric:{} digits>", value.len())
+                    } else {
+                        format!("<present:{} chars>", value.len())
+                    };
+                    format!("{name}={description}")
+                })
+                .collect::<Vec<_>>()
+                .join("&")
+        })
+        .unwrap_or_default();
+
+    let header_descriptions = std::str::from_utf8(headers)
+        .ok()
+        .map(|text| {
+            text.split("\r\n")
+                .skip(1)
+                .filter_map(|line| line.split_once(':'))
+                .filter_map(|(name, value)| {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        return None;
+                    }
+                    let lower = name.to_ascii_lowercase();
+                    let looks_like_identity = [
+                        "uin", "qq", "account", "openid", "open-id", "nickname", "avatar",
+                    ]
+                    .iter()
+                    .any(|needle| lower.contains(needle));
+                    if looks_like_identity {
+                        Some(format!("{name}=<present:{} chars>", value.trim().len()))
+                    } else if lower == "cookie" {
+                        let names = value
+                            .split(';')
+                            .filter_map(|item| item.trim().split_once('=').map(|(key, _)| key))
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        Some(format!("Cookie=<keys:{names}>"))
+                    } else {
+                        Some(name.to_owned())
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let line = format!(
+        "time={timestamp} method={} path={} query=[{}] headers=[{}]\n",
+        request.method,
+        request.target.split('?').next().unwrap_or_default(),
+        query,
+        header_descriptions
+    );
+    eprint!("{line}");
+    if let Some(path) = path
+        && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
 }
 
 async fn tunnel_connect(mut client: TcpStream, host: &str, port: u16) -> Result<(), String> {
@@ -324,6 +412,7 @@ mod tests {
             material.server_config,
             cancellation.clone(),
             sender,
+            None,
         ));
 
         let client = reqwest::Client::builder()

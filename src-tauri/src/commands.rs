@@ -1,5 +1,6 @@
 use crate::{
     app_state::AppCore,
+    qq_identity::{self, LocalQqIdentity},
     server_sync::{ConnectionInfo, ServerClient},
     settings::{AppSettings, SettingsView},
     status::StatusPayload,
@@ -71,4 +72,9 @@ pub async fn cleanup_network(core: State<'_, Arc<AppCore>>, app: AppHandle) -> R
 #[tauri::command]
 pub async fn get_captured_code(core: State<'_, Arc<AppCore>>) -> Result<String, String> {
     core.captured_code().await
+}
+
+#[tauri::command]
+pub fn detect_local_qq() -> Result<LocalQqIdentity, String> {
+    qq_identity::detect()
 }

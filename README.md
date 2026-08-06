@@ -4,6 +4,7 @@
 
 获取后可以：
 
+- 只读 Windows QQNT 的当前登录配置，识别当前 QQ 号、昵称和头像；
 - 自动调用 `qq-farm-bot` 的 `POST /api/accounts` 新增 QQ 账号；
 - 或者仅保存在内存中，由用户点击复制。
 
@@ -17,6 +18,14 @@
 6. 工具捕获 Code 后会立即恢复系统代理、移除临时根证书，再同步到服务器。
 
 QQ 农场窗口当次出现网络错误是预期现象：官方的 WebSocket 登录请求被本地工具主动阻断，避免一次性 Code 被官方客户端先消耗。
+
+## QQ 身份识别
+
+- 工具读取 `%APPDATA%\QQ\auth\login.enc` 中 QQNT 当前账号的 `account`、`uin`、`nickName` 和 `faceUrl`，不会读取聊天数据库。
+- 启动时、点击获取前和捕获 Code 后都会重新检测；如果是在代理启动后扫码登录一个新 QQ，最终同步时会优先采用新账号。
+- 若 QQ 登录列表尚未刷新，只要 `account` 已写入，仍会同步 QQ 号并使用 qlogo 头像回退。
+- 若本地检测完全不可用，Code 仍可正常同步；昵称、头像、农场 GID 与 OpenID 会由更新后的 `qq-farm-bot` 在登录成功后回填，QQ 号可手工填写。
+- 农场 WebSocket 请求本身不包含 UIN、昵称或头像，身份信息不是从 Code 中解码得到的。
 
 ## Token 说明
 

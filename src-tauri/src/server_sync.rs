@@ -3,6 +3,7 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
+use tokio::time::sleep;
 
 #[derive(Debug, Serialize)]
 struct AccountPayload<'a> {
@@ -11,6 +12,10 @@ struct AccountPayload<'a> {
     platform: &'static str,
     #[serde(rename = "loginType")]
     login_type: &'static str,
+    uin: &'a str,
+    qq: &'a str,
+    nick: &'a str,
+    avatar: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -24,6 +29,27 @@ struct ApiEnvelope {
 pub struct ConnectionInfo {
     pub username: String,
     pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountProfile {
+    pub account_id: String,
+    pub account_name: String,
+    pub nickname: String,
+    pub qq_number: String,
+    pub gid: String,
+    pub open_id: String,
+    pub avatar_url: String,
+    pub running: bool,
+}
+
+pub struct SyncAccountInput<'a> {
+    pub account_name: &'a str,
+    pub qq_number: &'a str,
+    pub nickname: &'a str,
+    pub avatar_url: &'a str,
+    pub code: &'a str,
 }
 
 pub struct ServerClient {
@@ -75,15 +101,24 @@ impl ServerClient {
         &self,
         server_url: &str,
         token: &str,
-        account_name: &str,
-        code: &str,
-    ) -> Result<(), String> {
+        input: SyncAccountInput<'_>,
+    ) -> Result<AccountProfile, String> {
         let endpoint = endpoint(server_url, "/api/accounts")?;
+        let fallback_avatar = qq_avatar_url(input.qq_number);
+        let avatar = if input.avatar_url.trim().is_empty() {
+            fallback_avatar.as_str()
+        } else {
+            input.avatar_url.trim()
+        };
         let payload = AccountPayload {
-            name: account_name,
-            code,
+            name: input.account_name,
+            code: input.code,
             platform: "qq",
             login_type: "manual",
+            uin: input.qq_number,
+            qq: input.qq_number,
+            nick: input.nickname,
+            avatar,
         };
         let response = self
             .client
@@ -93,7 +128,120 @@ impl ServerClient {
             .send()
             .await
             .map_err(|error| format!("同步 Code 失败: {error}"))?;
-        parse_response(response).await.map(|_| ())
+        let envelope = parse_response(response).await?;
+        let data = envelope
+            .data
+            .ok_or_else(|| "服务器没有返回新建账号信息".to_owned())?;
+        let mut profile = newest_account_profile(&data)
+            .ok_or_else(|| "服务器没有返回可识别的账号 ID".to_owned())?;
+
+        for _ in 0..30 {
+            if profile.has_game_identity() {
+                break;
+            }
+            sleep(Duration::from_millis(500)).await;
+            if let Some(updated) = self
+                .get_account_profile(server_url, token, &profile.account_id)
+                .await?
+            {
+                profile = updated;
+            }
+        }
+        Ok(profile)
+    }
+
+    async fn get_account_profile(
+        &self,
+        server_url: &str,
+        token: &str,
+        account_id: &str,
+    ) -> Result<Option<AccountProfile>, String> {
+        let endpoint = endpoint(server_url, "/api/accounts")?;
+        let response = self
+            .client
+            .get(endpoint)
+            .header("x-admin-token", token)
+            .send()
+            .await
+            .map_err(|error| format!("读取远程账号信息失败: {error}"))?;
+        let envelope = parse_response(response).await?;
+        Ok(envelope
+            .data
+            .as_ref()
+            .and_then(|data| account_profile_by_id(data, account_id)))
+    }
+}
+
+impl AccountProfile {
+    fn has_game_identity(&self) -> bool {
+        !self.nickname.is_empty() && (!self.gid.is_empty() || !self.open_id.is_empty())
+    }
+}
+
+fn newest_account_profile(data: &Value) -> Option<AccountProfile> {
+    data.get("accounts")
+        .and_then(Value::as_array)?
+        .last()
+        .and_then(account_profile_from_value)
+}
+
+fn account_profile_by_id(data: &Value, account_id: &str) -> Option<AccountProfile> {
+    data.get("accounts")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|account| value_string(account.get("id")) == account_id)
+        .and_then(account_profile_from_value)
+}
+
+fn account_profile_from_value(account: &Value) -> Option<AccountProfile> {
+    let account_id = value_string(account.get("id"));
+    if account_id.is_empty() {
+        return None;
+    }
+    let qq_number = first_value(account, &["uin", "qq"]);
+    let avatar = first_value(account, &["avatar", "avatarUrl", "avatar_url"]);
+    Some(AccountProfile {
+        account_id,
+        account_name: first_value(account, &["name"]),
+        nickname: first_value(account, &["nick", "nickname"]),
+        qq_number: qq_number.clone(),
+        gid: first_value(account, &["gid"]),
+        open_id: first_value(account, &["openId", "open_id"]),
+        avatar_url: if avatar.is_empty() {
+            qq_avatar_url(&qq_number)
+        } else {
+            avatar
+        },
+        running: account
+            .get("running")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn first_value(value: &Value, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|key| {
+            let value = value_string(value.get(*key));
+            (!value.is_empty()).then_some(value)
+        })
+        .unwrap_or_default()
+}
+
+fn value_string(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(value)) => value.trim().to_owned(),
+        Some(Value::Number(value)) => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn qq_avatar_url(qq_number: &str) -> String {
+    let qq_number = qq_number.trim();
+    if qq_number.is_empty() {
+        String::new()
+    } else {
+        format!("https://q1.qlogo.cn/g?b=qq&nk={qq_number}&s=100")
     }
 }
 
@@ -150,24 +298,33 @@ mod tests {
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
             request_sender.send(request).unwrap();
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 21\r\nConnection: close\r\n\r\n{\"ok\":true,\"data\":{}}",
-                )
-                .await
-                .unwrap();
+            let body = r#"{"ok":true,"data":{"accounts":[{"id":"7","name":"Windows QQ","nick":"测试农夫","uin":"12345678","gid":1027000001,"openId":"openid-test","avatar":"https://example.com/avatar.png","running":true}]}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
         });
 
-        ServerClient::new()
+        let profile = ServerClient::new()
             .unwrap()
             .sync_code(
                 &format!("http://127.0.0.1:{port}"),
                 "synthetic-token",
-                "Windows QQ",
-                "testcode0123456789abcdef0123456789",
+                SyncAccountInput {
+                    account_name: "Windows QQ",
+                    qq_number: "12345678",
+                    nickname: "本机昵称",
+                    avatar_url: "https://example.com/local-avatar.png",
+                    code: "testcode0123456789abcdef0123456789",
+                },
             )
             .await
             .unwrap();
+        assert_eq!(profile.nickname, "测试农夫");
+        assert_eq!(profile.gid, "1027000001");
+        assert_eq!(profile.qq_number, "12345678");
         let request = request_receiver.await.unwrap();
         assert!(request.starts_with("POST /api/accounts HTTP/1.1"));
         assert!(
@@ -177,6 +334,9 @@ mod tests {
         );
         assert!(request.contains("\"platform\":\"qq\""));
         assert!(request.contains("\"loginType\":\"manual\""));
+        assert!(request.contains("\"uin\":\"12345678\""));
+        assert!(request.contains("\"nick\":\"本机昵称\""));
+        assert!(request.contains("example.com/local-avatar.png"));
     }
 
     async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {

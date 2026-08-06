@@ -1,7 +1,7 @@
 use crate::{
     certificates::CertificateManager,
-    proxy,
-    server_sync::ServerClient,
+    proxy, qq_identity,
+    server_sync::{ServerClient, SyncAccountInput},
     settings::{AppSettings, SettingsStore, SettingsView},
     status::StatusPayload,
     system_proxy::SystemProxyManager,
@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::{
     sync::{Mutex, mpsc},
     task::JoinHandle,
+    time::{Duration, sleep},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -40,6 +41,7 @@ impl Default for RuntimeState {
 
 pub struct AppCore {
     certificates: CertificateManager,
+    diagnostics_path: PathBuf,
     proxy_manager: SystemProxyManager,
     settings: SettingsStore,
     runtime: Mutex<RuntimeState>,
@@ -51,6 +53,7 @@ impl AppCore {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
             certificates: CertificateManager::new(data_dir.clone()),
+            diagnostics_path: data_dir.join("traffic-diagnostics.log"),
             proxy_manager: SystemProxyManager::new(data_dir.clone()),
             settings: SettingsStore::new(data_dir),
             runtime: Mutex::new(RuntimeState::default()),
@@ -114,7 +117,14 @@ impl AppCore {
         };
         let cancellation = CancellationToken::new();
         let (sender, receiver) = mpsc::channel(1);
-        let task = tokio::spawn(proxy::run(listener, tls, cancellation.clone(), sender));
+        let _ = std::fs::remove_file(&self.diagnostics_path);
+        let task = tokio::spawn(proxy::run(
+            listener,
+            tls,
+            cancellation.clone(),
+            sender,
+            Some(self.diagnostics_path.clone()),
+        ));
         self.store_transport(cancellation, task).await;
 
         if let Err(error) = self.enable_system_proxy(settings.proxy_port).await {
@@ -246,16 +256,24 @@ impl AppCore {
         .await;
         let result = self.sync_code(settings, code).await;
         match result {
-            Ok(()) => {
+            Ok(profile) => {
                 self.set_code(None).await;
                 self.publish(
                     app,
                     StatusPayload::new(
                         "completed",
                         "同步完成",
-                        "账号已写入服务器并由 qq-farm-bot 自动启动。",
+                        format!(
+                            "已同步到 {}。",
+                            if profile.nickname.is_empty() {
+                                profile.account_name.as_str()
+                            } else {
+                                profile.nickname.as_str()
+                            }
+                        ),
                         false,
-                    ),
+                    )
+                    .with_profile(profile),
                 )
                 .await;
             }
@@ -266,13 +284,38 @@ impl AppCore {
         }
     }
 
-    async fn sync_code(&self, settings: &AppSettings, code: &str) -> Result<(), String> {
+    async fn sync_code(
+        &self,
+        settings: &AppSettings,
+        code: &str,
+    ) -> Result<crate::server_sync::AccountProfile, String> {
         let token = self
             .settings
             .token()?
             .ok_or_else(|| "未配置服务器 Token".to_owned())?;
+        let detected = detect_current_qq_with_retry().await;
+        let qq_number = detected
+            .as_ref()
+            .map(|identity| identity.qq_number.as_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or(settings.qq_number.as_str());
+        let matching_identity = detected.as_ref();
         ServerClient::new()?
-            .sync_code(&settings.server_url, &token, &settings.account_name, code)
+            .sync_code(
+                &settings.server_url,
+                &token,
+                SyncAccountInput {
+                    account_name: &settings.account_name,
+                    qq_number,
+                    nickname: matching_identity
+                        .map(|identity| identity.nickname.as_str())
+                        .unwrap_or_default(),
+                    avatar_url: matching_identity
+                        .map(|identity| identity.avatar_url.as_str())
+                        .unwrap_or_default(),
+                    code,
+                },
+            )
             .await
     }
 
@@ -367,4 +410,16 @@ impl AppCore {
     pub fn mark_exiting(&self) -> bool {
         self.exiting.swap(true, Ordering::SeqCst)
     }
+}
+
+async fn detect_current_qq_with_retry() -> Option<qq_identity::LocalQqIdentity> {
+    for attempt in 0..4 {
+        if let Ok(identity) = qq_identity::detect() {
+            return Some(identity);
+        }
+        if attempt < 3 {
+            sleep(Duration::from_millis(250)).await;
+        }
+    }
+    None
 }

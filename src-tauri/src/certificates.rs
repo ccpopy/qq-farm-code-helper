@@ -51,7 +51,18 @@ impl CertificateManager {
         let script = format!(
             r#"
 $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{path}'))
-Import-Certificate -FilePath $path -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
+$store = [Security.Cryptography.X509Certificates.X509Store]::new(
+  [Security.Cryptography.X509Certificates.StoreName]::Root,
+  [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+)
+$certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($path)
+try {{
+  $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+  $store.Add($certificate)
+}} finally {{
+  $store.Close()
+  $certificate.Dispose()
+}}
 "#
         );
         run_powershell(&script).map(|_| ())
@@ -62,9 +73,22 @@ Import-Certificate -FilePath $path -CertStoreLocation 'Cert:\CurrentUser\Root' |
         let script = format!(
             r#"
 $subject = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{subject}'))
-Get-ChildItem -Path 'Cert:\CurrentUser\Root' |
-  Where-Object {{ $_.Subject -eq $subject }} |
-  Remove-Item -Force
+$store = [Security.Cryptography.X509Certificates.X509Store]::new(
+  [Security.Cryptography.X509Certificates.StoreName]::Root,
+  [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+)
+try {{
+  $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+  $thumbprints = @($store.Certificates |
+    Where-Object {{ $_.Subject -eq $subject }} |
+    ForEach-Object {{ $_.Thumbprint }})
+}} finally {{
+  $store.Close()
+}}
+foreach ($thumbprint in $thumbprints) {{
+  & "$env:SystemRoot\System32\certutil.exe" -f -user -delstore Root $thumbprint | Out-Null
+  if ($LASTEXITCODE -ne 0) {{ throw "certutil 删除临时证书失败: $LASTEXITCODE" }}
+}}
 "#
         );
         run_powershell(&script).map(|_| ())

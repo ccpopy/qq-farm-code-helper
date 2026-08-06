@@ -2,6 +2,7 @@ mod app_state;
 mod certificates;
 mod commands;
 mod proxy;
+mod qq_identity;
 mod server_sync;
 mod settings;
 mod status;
@@ -31,6 +32,7 @@ fn main() {
             commands::stop_capture,
             commands::cleanup_network,
             commands::get_captured_code,
+            commands::detect_local_qq,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build QQ Farm Code Helper");

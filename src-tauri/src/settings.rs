@@ -11,6 +11,7 @@ const KEYRING_USER: &str = "qq-farm-bot-server-token";
 pub struct AppSettings {
     pub server_url: String,
     pub account_name: String,
+    pub qq_number: String,
     pub auto_sync: bool,
     pub proxy_port: u16,
 }
@@ -20,6 +21,7 @@ impl Default for AppSettings {
         Self {
             server_url: String::new(),
             account_name: "Windows QQ".to_owned(),
+            qq_number: String::new(),
             auto_sync: true,
             proxy_port: 8899,
         }
@@ -113,6 +115,13 @@ fn normalize_settings(settings: &mut AppSettings) -> Result<(), String> {
     if settings.account_name.is_empty() {
         settings.account_name = "Windows QQ".to_owned();
     }
+    settings.qq_number = settings.qq_number.trim().to_owned();
+    if !settings.qq_number.is_empty()
+        && (!(5..=12).contains(&settings.qq_number.len())
+            || !settings.qq_number.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err("QQ 号必须是 5 到 12 位数字".to_owned());
+    }
     if !(1024..=65535).contains(&settings.proxy_port) {
         return Err("本地代理端口必须在 1024 到 65535 之间".to_owned());
     }
@@ -149,5 +158,14 @@ mod tests {
     #[test]
     fn rejects_server_url_with_query() {
         assert!(normalize_server_url("https://farm.example.com/?token=x").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_qq_number() {
+        let mut settings = AppSettings {
+            qq_number: "12ab".to_owned(),
+            ..AppSettings::default()
+        };
+        assert!(normalize_settings(&mut settings).is_err());
     }
 }

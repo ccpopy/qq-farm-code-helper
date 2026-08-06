@@ -1,3 +1,4 @@
+use crate::server_sync::AccountProfile;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -6,6 +7,7 @@ pub struct StatusPayload {
     pub title: String,
     pub detail: String,
     pub code_available: bool,
+    pub profile: Option<AccountProfile>,
 }
 
 impl StatusPayload {
@@ -29,6 +31,12 @@ impl StatusPayload {
             title: title.into(),
             detail: detail.into(),
             code_available,
+            profile: None,
         }
+    }
+
+    pub fn with_profile(mut self, profile: AccountProfile) -> Self {
+        self.profile = Some(profile);
+        self
     }
 }
