@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>QQ农场 Code 获取助手</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
+  <main class="app-shell">
+    <header class="app-header reveal reveal-1">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 48 48" role="img">
+          <path d="M24 42V20" />
+          <path d="M24 29c-8 0-14-5-15-13 8-1 14 2 15 9" />
+          <path d="M24 24c1-8 7-12 15-11 0 8-5 14-15 14" />
+        </svg>
+      </div>
+      <div>
+        <div class="eyebrow">QQ FARM LOCAL TOOL</div>
+        <h1>Code 获取助手</h1>
+        <p>只处理 Windows QQ 的农场登录请求</p>
+      </div>
+      <div class="version-chip">v0.1.0</div>
+    </header>
+
+    <section class="status-card reveal reveal-2" aria-live="polite">
+      <div class="status-topline">
+        <div class="status-signal" id="statusSignal"><span></span></div>
+        <div class="status-copy">
+          <div class="status-kicker">当前状态</div>
+          <h2 id="statusTitle">尚未启动</h2>
+          <p id="statusDetail">保存服务器设置后，启动一次性本地代理。</p>
+        </div>
+        <div class="status-code" id="statusCode">IDLE</div>
+      </div>
+
+      <ol class="stage-list" id="stageList">
+        <li data-stage="preparing_proxy">
+          <span class="stage-index">01</span>
+          <span><strong>启动代理</strong><small>仅信任本次临时证书</small></span>
+        </li>
+        <li data-stage="waiting_login">
+          <span class="stage-index">02</span>
+          <span><strong>等待登录</strong><small>在 Windows QQ 打开农场</small></span>
+        </li>
+        <li data-stage="code_captured">
+          <span class="stage-index">03</span>
+          <span><strong>获取 Code</strong><small>阻止官方客户端消耗</small></span>
+        </li>
+        <li data-stage="syncing">
+          <span class="stage-index">04</span>
+          <span><strong>同步服务器</strong><small>新建 QQ 账号并自动启动</small></span>
+        </li>
+      </ol>
+
+      <div class="action-row">
+        <button class="primary-action" id="startButton" type="button">
+          <span class="button-dot"></span>
+          <span id="startButtonText">启动获取</span>
+        </button>
+        <button class="secondary-action" id="stopButton" type="button" disabled>停止并恢复网络</button>
+        <button class="secondary-action hidden" id="copyButton" type="button">复制 Code</button>
+      </div>
+    </section>
+
+    <section class="settings-card reveal reveal-3">
+      <div class="section-heading">
+        <div>
+          <div class="eyebrow">SERVER SYNC</div>
+          <h2>服务器设置</h2>
+        </div>
+        <label class="switch-field">
+          <span>获取后自动同步</span>
+          <input id="autoSync" type="checkbox" checked>
+          <i aria-hidden="true"></i>
+        </label>
+      </div>
+
+      <div class="form-grid">
+        <label class="field field-wide">
+          <span>服务器地址</span>
+          <input id="serverUrl" type="url" placeholder="https://farm.example.com" autocomplete="url">
+          <small>填写 qq-farm-bot 管理页面地址，不要带 /api 路径。</small>
+        </label>
+
+        <label class="field field-wide">
+          <span>后台登录 Token</span>
+          <div class="secret-input">
+            <input id="serverToken" type="password" placeholder="留空则保留已安全保存的 Token" autocomplete="off">
+            <button id="toggleToken" type="button" aria-label="显示或隐藏 Token">显示</button>
+          </div>
+          <small id="tokenHint">Token 保存在 Windows 凭据管理器，不写入配置文件。</small>
+        </label>
+
+        <label class="field">
+          <span>账号备注</span>
+          <input id="accountName" type="text" maxlength="40" placeholder="Windows QQ">
+        </label>
+
+        <label class="field">
+          <span>本地代理端口</span>
+          <input id="proxyPort" type="number" min="1024" max="65535" value="8899">
+        </label>
+      </div>
+
+      <div class="settings-actions">
+        <button class="text-action" id="testButton" type="button">测试连接</button>
+        <button class="text-action danger" id="cleanupButton" type="button">清理代理与证书</button>
+        <button class="save-action" id="saveButton" type="button">保存设置</button>
+      </div>
+      <div class="inline-message" id="inlineMessage" role="status"></div>
+    </section>
+
+    <footer class="privacy-note reveal reveal-4">
+      <span class="privacy-icon">·</span>
+      <p>Code 只保存在内存中；代理关闭时会恢复原系统设置并移除临时根证书。</p>
+    </footer>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>

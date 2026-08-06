@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "QQ农场 Code 获取助手",
+  "version": "0.1.0",
+  "identifier": "io.github.ccpopy.qqfarmcodehelper",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "QQ农场 Code 获取助手",
+        "width": 900,
+        "height": 760,
+        "minWidth": 780,
+        "minHeight": 680,
+        "center": true,
+        "resizable": true,
+        "maximizable": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

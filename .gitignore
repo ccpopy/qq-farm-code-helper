@@ -1,0 +1,11 @@
+/src-tauri/target/
+/src-tauri/gen/
+/release/
+/.playwright-cli/
+*.pdb
+*.log
+.DS_Store
+Thumbs.db
+/src-tauri/icons/*
+!/src-tauri/icons/app-icon.svg
+!/src-tauri/icons/icon.ico
