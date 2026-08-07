@@ -7,6 +7,8 @@ use tokio::time::sleep;
 
 #[derive(Debug, Serialize)]
 struct AccountPayload<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<&'a str>,
     name: &'a str,
     code: &'a str,
     platform: &'static str,
@@ -16,6 +18,12 @@ struct AccountPayload<'a> {
     qq: &'a str,
     nick: &'a str,
     avatar: &'a str,
+}
+
+#[derive(Debug)]
+struct ExistingAccount {
+    id: String,
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +79,14 @@ impl ServerClient {
         server_url: &str,
         token: &str,
     ) -> Result<ConnectionInfo, String> {
+        self.get_connection_info(server_url, token).await
+    }
+
+    async fn get_connection_info(
+        &self,
+        server_url: &str,
+        token: &str,
+    ) -> Result<ConnectionInfo, String> {
         let endpoint = endpoint(server_url, "/api/user/me")?;
         let response = self
             .client
@@ -83,17 +99,13 @@ impl ServerClient {
         let data = envelope
             .data
             .ok_or_else(|| "服务器没有返回用户信息".to_owned())?;
+        let username = first_value(&data, &["username"]);
+        if username.is_empty() {
+            return Err("服务器没有返回当前用户名，已停止同步以避免覆盖其他用户账号".to_owned());
+        }
         Ok(ConnectionInfo {
-            username: data
-                .get("username")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_owned(),
-            role: data
-                .get("role")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_owned(),
+            username,
+            role: first_value(&data, &["role"]),
         })
     }
 
@@ -104,6 +116,9 @@ impl ServerClient {
         input: SyncAccountInput<'_>,
     ) -> Result<AccountProfile, String> {
         let qq_number = validated_qq_number(input.qq_number)?;
+        let connection = self.get_connection_info(server_url, token).await?;
+        let accounts = self.get_accounts_data(server_url, token).await?;
+        let existing = existing_qq_account(&accounts, qq_number, &connection);
         let endpoint = endpoint(server_url, "/api/accounts")?;
         let fallback_avatar = qq_avatar_url(qq_number);
         let avatar = if input.avatar_url.trim().is_empty() {
@@ -111,8 +126,14 @@ impl ServerClient {
         } else {
             input.avatar_url.trim()
         };
+        let account_name = existing
+            .as_ref()
+            .map(|account| account.name.trim())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(input.account_name);
         let payload = AccountPayload {
-            name: input.account_name,
+            id: existing.as_ref().map(|account| account.id.as_str()),
+            name: account_name,
             code: input.code,
             platform: "qq",
             login_type: "manual",
@@ -132,9 +153,14 @@ impl ServerClient {
         let envelope = parse_response(response).await?;
         let data = envelope
             .data
-            .ok_or_else(|| "服务器没有返回新建账号信息".to_owned())?;
-        let mut profile = newest_account_profile(&data)
-            .ok_or_else(|| "服务器没有返回可识别的账号 ID".to_owned())?;
+            .ok_or_else(|| "服务器没有返回账号信息".to_owned())?;
+        let mut profile = if let Some(existing) = existing {
+            account_profile_by_id(&data, &existing.id)
+                .ok_or_else(|| format!("服务器更新账号 {} 后没有返回对应账号信息", existing.id))?
+        } else {
+            newest_account_profile(&data)
+                .ok_or_else(|| "服务器没有返回可识别的账号 ID".to_owned())?
+        };
 
         for _ in 0..30 {
             if profile.has_game_identity() {
@@ -157,6 +183,11 @@ impl ServerClient {
         token: &str,
         account_id: &str,
     ) -> Result<Option<AccountProfile>, String> {
+        let data = self.get_accounts_data(server_url, token).await?;
+        Ok(account_profile_by_id(&data, account_id))
+    }
+
+    async fn get_accounts_data(&self, server_url: &str, token: &str) -> Result<Value, String> {
         let endpoint = endpoint(server_url, "/api/accounts")?;
         let response = self
             .client
@@ -166,10 +197,9 @@ impl ServerClient {
             .await
             .map_err(|error| format!("读取远程账号信息失败: {error}"))?;
         let envelope = parse_response(response).await?;
-        Ok(envelope
+        envelope
             .data
-            .as_ref()
-            .and_then(|data| account_profile_by_id(data, account_id)))
+            .ok_or_else(|| "服务器没有返回账号列表".to_owned())
     }
 }
 
@@ -193,6 +223,45 @@ fn newest_account_profile(data: &Value) -> Option<AccountProfile> {
         .and_then(Value::as_array)?
         .last()
         .and_then(account_profile_from_value)
+}
+
+fn existing_qq_account(
+    data: &Value,
+    qq_number: &str,
+    connection: &ConnectionInfo,
+) -> Option<ExistingAccount> {
+    data.get("accounts")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|account| {
+            let platform = first_value(account, &["platform"]);
+            if !platform.is_empty() && !platform.eq_ignore_ascii_case("qq") {
+                return None;
+            }
+            if first_value(account, &["uin", "qq"]) != qq_number {
+                return None;
+            }
+
+            let username = first_value(account, &["username"]);
+            let owned_by_current_user = username == connection.username;
+            let legacy_admin_account =
+                username.is_empty() && connection.role.eq_ignore_ascii_case("admin");
+            if !owned_by_current_user && !legacy_admin_account {
+                return None;
+            }
+
+            let id = value_string(account.get("id"));
+            if id.is_empty() {
+                return None;
+            }
+            Some(ExistingAccount {
+                id,
+                name: first_value(account, &["name"]),
+            })
+        })
+        // qq-farm-bot 的数字 ID 按创建顺序递增；已有重复项时优先复用最早账号，
+        // 以最大概率保留用户最初绑定在该 ID 下的策略与配置。
+        .min_by_key(|account| account.id.parse::<u64>().unwrap_or(u64::MAX))
 }
 
 fn account_profile_by_id(data: &Value, account_id: &str) -> Option<AccountProfile> {
@@ -299,28 +368,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn admin_can_reuse_a_legacy_unowned_qq_account() {
+        let data: Value = serde_json::from_str(
+            r#"{"accounts":[{"id":"3","name":"旧版账号","username":"","platform":"qq","uin":"12345678"}]}"#,
+        )
+        .unwrap();
+        let connection = ConnectionInfo {
+            username: "admin".to_owned(),
+            role: "admin".to_owned(),
+        };
+
+        let account = existing_qq_account(&data, "12345678", &connection).unwrap();
+        assert_eq!(account.id, "3");
+    }
+
     #[tokio::test]
-    async fn sync_sends_expected_auth_and_account_payload() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let (request_sender, request_receiver) = oneshot::channel();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let request = read_http_request(&mut socket).await;
-            request_sender.send(request).unwrap();
-            let body = r#"{"ok":true,"data":{"accounts":[{"id":"7","name":"Windows QQ","nick":"测试农夫","uin":"12345678","gid":1027000001,"openId":"openid-test","avatar":"https://example.com/avatar.png","running":true}]}}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
-        });
+    async fn sync_creates_account_when_qq_is_not_present() {
+        let (server_url, request_receiver) = serve_http_responses(vec![
+            r#"{"ok":true,"data":{"username":"admin","role":"admin"}}"#,
+            r#"{"ok":true,"data":{"accounts":[],"nextId":7}}"#,
+            r#"{"ok":true,"data":{"accounts":[{"id":"7","name":"Windows QQ","username":"admin","nick":"测试农夫","uin":"12345678","gid":1027000001,"openId":"openid-test","avatar":"https://example.com/avatar.png","running":true}]}}"#,
+        ])
+        .await;
 
         let profile = ServerClient::new()
             .unwrap()
             .sync_code(
-                &format!("http://127.0.0.1:{port}"),
+                &server_url,
                 "synthetic-token",
                 SyncAccountInput {
                     account_name: "Windows QQ",
@@ -335,7 +410,11 @@ mod tests {
         assert_eq!(profile.nickname, "测试农夫");
         assert_eq!(profile.gid, "1027000001");
         assert_eq!(profile.qq_number, "12345678");
-        let request = request_receiver.await.unwrap();
+        let requests = request_receiver.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with("GET /api/user/me HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /api/accounts HTTP/1.1"));
+        let request = &requests[2];
         assert!(request.starts_with("POST /api/accounts HTTP/1.1"));
         assert!(
             request
@@ -347,6 +426,72 @@ mod tests {
         assert!(request.contains("\"uin\":\"12345678\""));
         assert!(request.contains("\"nick\":\"本机昵称\""));
         assert!(request.contains("example.com/local-avatar.png"));
+        assert!(!request.contains("\"id\":"));
+    }
+
+    #[tokio::test]
+    async fn sync_updates_oldest_matching_qq_account_and_preserves_its_name() {
+        let (server_url, request_receiver) = serve_http_responses(vec![
+            r#"{"ok":true,"data":{"username":"admin","role":"admin"}}"#,
+            r#"{"ok":true,"data":{"accounts":[{"id":"2","name":"主号原配置","username":"admin","platform":"qq","uin":"12345678","running":false},{"id":"7","name":"重复账号","username":"admin","platform":"qq","uin":"12345678","running":true},{"id":"8","name":"其他用户账号","username":"alice","platform":"qq","uin":"12345678","running":true}]}}"#,
+            r#"{"ok":true,"data":{"accounts":[{"id":"2","name":"主号原配置","username":"admin","platform":"qq","nick":"测试农夫","uin":"12345678","gid":1027000001,"openId":"openid-test","running":false},{"id":"7","name":"重复账号","username":"admin","platform":"qq","uin":"12345678","running":true}]}}"#,
+        ])
+        .await;
+
+        let profile = ServerClient::new()
+            .unwrap()
+            .sync_code(
+                &server_url,
+                "synthetic-token",
+                SyncAccountInput {
+                    account_name: "Windows QQ",
+                    qq_number: "12345678",
+                    nickname: "本机昵称",
+                    avatar_url: "",
+                    code: "newcode0123456789abcdef0123456789",
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(profile.account_id, "2");
+        assert_eq!(profile.account_name, "主号原配置");
+        let requests = request_receiver.await.unwrap();
+        let request = &requests[2];
+        assert!(request.contains("\"id\":\"2\""));
+        assert!(request.contains("\"name\":\"主号原配置\""));
+        assert!(request.contains("\"code\":\"newcode0123456789abcdef0123456789\""));
+        assert!(!request.contains("\"id\":\"7\""));
+    }
+
+    #[tokio::test]
+    async fn sync_does_not_update_same_qq_owned_by_another_user() {
+        let (server_url, request_receiver) = serve_http_responses(vec![
+            r#"{"ok":true,"data":{"username":"admin","role":"admin"}}"#,
+            r#"{"ok":true,"data":{"accounts":[{"id":"5","name":"其他用户账号","username":"alice","platform":"qq","uin":"12345678","running":true}]}}"#,
+            r#"{"ok":true,"data":{"accounts":[{"id":"5","name":"其他用户账号","username":"alice","platform":"qq","uin":"12345678","running":true},{"id":"6","name":"Windows QQ","username":"admin","platform":"qq","nick":"测试农夫","uin":"12345678","gid":1027000001,"openId":"openid-new","running":true}]}}"#,
+        ])
+        .await;
+
+        let profile = ServerClient::new()
+            .unwrap()
+            .sync_code(
+                &server_url,
+                "synthetic-token",
+                SyncAccountInput {
+                    account_name: "Windows QQ",
+                    qq_number: "12345678",
+                    nickname: "本机昵称",
+                    avatar_url: "",
+                    code: "newcode0123456789abcdef0123456789",
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(profile.account_id, "6");
+        let requests = request_receiver.await.unwrap();
+        assert!(!requests[2].contains("\"id\":"));
     }
 
     #[tokio::test]
@@ -388,14 +533,40 @@ mod tests {
         String::from_utf8(bytes).unwrap()
     }
 
+    async fn serve_http_responses(
+        bodies: Vec<&'static str>,
+    ) -> (String, oneshot::Receiver<Vec<String>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (request_sender, request_receiver) = oneshot::channel();
+        tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(bodies.len());
+            for body in bodies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                requests.push(read_http_request(&mut socket).await);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            request_sender.send(requests).unwrap();
+        });
+        (format!("http://127.0.0.1:{port}"), request_receiver)
+    }
+
     fn total_request_length(bytes: &[u8]) -> Option<usize> {
         let header_end = bytes.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
         let headers = std::str::from_utf8(&bytes[..header_end]).ok()?;
-        let content_length = headers.lines().find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())?
-        })?;
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())?
+            })
+            .unwrap_or(0);
         Some(header_end + content_length)
     }
 }
