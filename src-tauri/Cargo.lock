@@ -2704,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "qq-farm-code-helper"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.22.1",
  "keyring",
@@ -2712,8 +2712,10 @@ dependencies = [
  "reqwest 0.12.28",
  "rustls",
  "rustls-pki-types",
+ "semver",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",

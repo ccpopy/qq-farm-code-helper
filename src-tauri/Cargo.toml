@@ -1,6 +1,6 @@
 [package]
 name = "qq-farm-code-helper"
-version = "0.1.4"
+version = "0.1.5"
 description = "Windows QQ 农场一次性 Code 本地获取助手"
 authors = ["ccpopy"]
 edition = "2024"
@@ -17,8 +17,10 @@ rcgen = { version = "0.13.2", default-features = false, features = ["pem", "ring
 reqwest = { version = "0.12.24", features = ["json"] }
 rustls = { version = "0.23.32", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.12.0"
+semver = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+sha2 = "0.10"
 tauri = { version = "2.11.5", features = [] }
 tauri-plugin-single-instance = "2"
 thiserror = "2.0.17"

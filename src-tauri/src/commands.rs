@@ -4,6 +4,7 @@ use crate::{
     server_sync::{ConnectionInfo, ServerClient},
     settings::{AppSettings, SettingsView},
     status::StatusPayload,
+    updater::{self, UpdateInfo},
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -77,4 +78,28 @@ pub async fn get_captured_code(core: State<'_, Arc<AppCore>>) -> Result<String, 
 #[tauri::command]
 pub async fn detect_local_qq() -> Result<LocalQqIdentity, String> {
     qq_identity::detect_stable_async().await
+}
+
+#[tauri::command]
+pub async fn check_for_update() -> Result<UpdateInfo, String> {
+    updater::check_for_update().await
+}
+
+#[tauri::command]
+pub fn save_update_proxy(core: State<'_, Arc<AppCore>>, enabled: bool) -> Result<(), String> {
+    core.set_update_proxy(enabled)
+}
+
+#[tauri::command]
+pub async fn install_update(
+    core: State<'_, Arc<AppCore>>,
+    app: AppHandle,
+    use_proxy: bool,
+) -> Result<(), String> {
+    let prepared = updater::prepare_update(use_proxy).await?;
+    core.shutdown().await;
+    updater::launch_prepared_update(prepared)?;
+    core.mark_exiting();
+    app.exit(0);
+    Ok(())
 }

@@ -24,7 +24,7 @@
         <h1>Code 获取助手</h1>
         <p class="brand-subtitle">在 Windows QQ 内安全获取农场登录 Code</p>
       </div>
-      <span class="version-chip">v0.1.4</span>
+      <span class="version-chip" id="versionChip">v0.1.5</span>
     </div>
   </header>
 
@@ -153,6 +153,33 @@
             <button class="save-action" id="saveButton" type="button">保存设置</button>
           </div>
           <div class="inline-message" id="inlineMessage" role="status"></div>
+        </section>
+
+        <section class="card update-card reveal reveal-4" aria-labelledby="updateHeading">
+          <div class="update-copy">
+            <div class="update-heading-row">
+              <div>
+                <p class="section-label">APP UPDATE</p>
+                <h2 id="updateHeading">应用更新</h2>
+              </div>
+              <span class="update-version" id="updateVersion">v0.1.5</span>
+            </div>
+            <p class="update-status" id="updateStatus" aria-live="polite">启动后自动检查 GitHub Release，也可以手动检查。</p>
+            <p class="update-target" id="updateTarget">更新会保留当前程序所在目录。</p>
+            <p class="update-notes hidden" id="updateNotes"></p>
+          </div>
+          <div class="update-controls">
+            <label class="switch-field update-proxy-switch">
+              <span>使用 GitHub 加速</span>
+              <input id="updateProxy" type="checkbox" checked>
+              <i aria-hidden="true"></i>
+            </label>
+            <small id="updateProxyHint">默认通过 gh.lessdo.top 下载，安装前仍会校验 GitHub 官方 SHA-256。</small>
+            <div class="update-actions">
+              <button class="text-action" id="checkUpdateButton" type="button">检查更新</button>
+              <button class="update-action hidden" id="installUpdateButton" type="button">下载并安装</button>
+            </div>
+          </div>
         </section>
 
         <footer class="privacy-note reveal reveal-4">

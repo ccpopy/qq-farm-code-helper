@@ -5,9 +5,11 @@ const elements = {
   accountName: document.querySelector('#accountName'),
   autoSync: document.querySelector('#autoSync'),
   cleanupButton: document.querySelector('#cleanupButton'),
+  checkUpdateButton: document.querySelector('#checkUpdateButton'),
   copyButton: document.querySelector('#copyButton'),
   detectQqButton: document.querySelector('#detectQqButton'),
   inlineMessage: document.querySelector('#inlineMessage'),
+  installUpdateButton: document.querySelector('#installUpdateButton'),
   proxyPort: document.querySelector('#proxyPort'),
   qqNumber: document.querySelector('#qqNumber'),
   profileAvatar: document.querySelector('#profileAvatar'),
@@ -33,6 +35,13 @@ const elements = {
   toggleToken: document.querySelector('#toggleToken'),
   tokenHint: document.querySelector('#tokenHint'),
   toastViewport: document.querySelector('#toastViewport'),
+  updateNotes: document.querySelector('#updateNotes'),
+  updateProxy: document.querySelector('#updateProxy'),
+  updateProxyHint: document.querySelector('#updateProxyHint'),
+  updateStatus: document.querySelector('#updateStatus'),
+  updateTarget: document.querySelector('#updateTarget'),
+  updateVersion: document.querySelector('#updateVersion'),
+  versionChip: document.querySelector('#versionChip'),
 }
 
 const stageOrder = ['preparing_proxy', 'waiting_login', 'code_captured', 'syncing']
@@ -46,6 +55,7 @@ let currentIdentityError = ''
 let currentRemoteProfile = null
 let hasIdentityResult = false
 let identityRequest = null
+let latestUpdate = null
 let toastSequence = 0
 
 const toastIcons = {
@@ -138,6 +148,7 @@ function settingsPayload() {
       qq_number: elements.qqNumber.value.trim(),
       auto_sync: elements.autoSync.checked,
       proxy_port: Number(elements.proxyPort.value),
+      update_proxy: elements.updateProxy.checked,
     },
     token: elements.serverToken.value.trim() || null,
   }
@@ -258,9 +269,128 @@ function fillSettings(data) {
   elements.qqNumber.value = data.settings.qq_number || ''
   elements.autoSync.checked = data.settings.auto_sync !== false
   elements.proxyPort.value = data.settings.proxy_port || 8899
+  elements.updateProxy.checked = data.settings.update_proxy !== false
+  syncUpdateProxyHint()
   elements.tokenHint.textContent = data.token_configured
     ? 'Token 已安全保存在 Windows 凭据管理器；留空即保留。'
     : 'Token 保存在 Windows 凭据管理器，不写入配置文件。'
+}
+
+function syncUpdateProxyHint() {
+  elements.updateProxyHint.textContent = elements.updateProxy.checked
+    ? '通过 gh.lessdo.top 加速下载，执行前仍校验 GitHub 官方 SHA-256。'
+    : '直接从 GitHub 下载，执行前校验 GitHub 官方 SHA-256。'
+}
+
+async function saveUpdateProxyPreference() {
+  syncUpdateProxyHint()
+  try {
+    await invoke('save_update_proxy', { enabled: elements.updateProxy.checked })
+  }
+  catch (error) {
+    showToast(String(error), { type: 'warning', title: '更新下载设置未保存', id: 'update-proxy-setting' })
+  }
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0)
+    return '未知大小'
+  if (bytes >= 1024 * 1024)
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${Math.ceil(bytes / 1024)} KB`
+}
+
+function releaseNotesSummary(notes) {
+  return String(notes || '')
+    .split(/\r?\n/)
+    .map(line => line.replace(/^#{1,6}\s*/, '').replace(/^[-*]\s*/, '').replaceAll('`', '').trim())
+    .filter(Boolean)
+    .slice(0, 3)
+    .join(' · ')
+}
+
+function renderUpdate(info) {
+  latestUpdate = info
+  const currentVersion = `v${info.currentVersion}`
+  const latestVersion = `v${info.latestVersion}`
+  elements.versionChip.textContent = currentVersion
+  elements.updateVersion.textContent = info.updateAvailable ? `${currentVersion} → ${latestVersion}` : currentVersion
+  elements.updateVersion.classList.toggle('available', info.updateAvailable)
+  elements.installUpdateButton.classList.toggle('hidden', !info.updateAvailable)
+
+  if (info.updateAvailable) {
+    elements.updateStatus.textContent = `发现 ${latestVersion}，更新包 ${formatBytes(info.packageSize)}。`
+    elements.updateTarget.textContent = info.installMode === 'portable'
+      ? `更新时将退出程序并原地替换：${info.installTarget}`
+      : `更新时将退出程序并静默安装到：${info.installTarget}`
+    const summary = releaseNotesSummary(info.releaseNotes)
+    elements.updateNotes.textContent = summary
+    elements.updateNotes.classList.toggle('hidden', !summary)
+  }
+  else {
+    elements.updateStatus.textContent = `当前已是最新稳定版 ${currentVersion}。`
+    elements.updateTarget.textContent = `后续更新仍会保留当前路径：${info.installTarget}`
+    elements.updateNotes.textContent = ''
+    elements.updateNotes.classList.add('hidden')
+  }
+}
+
+async function checkForUpdate({ silent = false } = {}) {
+  setBusy(elements.checkUpdateButton, true, '检查中…')
+  elements.updateStatus.textContent = '正在连接 GitHub Release…'
+  try {
+    const info = await invoke('check_for_update')
+    renderUpdate(info)
+    if (info.updateAvailable) {
+      showToast(`发现 v${info.latestVersion}，可下载后在当前目录静默更新。`, {
+        type: 'info',
+        title: '发现新版本',
+        duration: 8000,
+        id: 'app-update',
+      })
+    }
+    else if (!silent) {
+      showToast(`当前已是最新版 v${info.currentVersion}。`, { type: 'success', title: '检查完成', id: 'app-update' })
+    }
+    return info
+  }
+  catch (error) {
+    elements.updateStatus.textContent = '暂时无法检查更新，可以稍后手动重试。'
+    elements.updateTarget.textContent = String(error)
+    if (!silent)
+      showMessage(String(error), { type: 'error', title: '检查更新失败' })
+    return null
+  }
+  finally {
+    setBusy(elements.checkUpdateButton, false)
+  }
+}
+
+async function installUpdate() {
+  if (!latestUpdate?.updateAvailable) {
+    const info = await checkForUpdate()
+    if (!info?.updateAvailable)
+      return
+  }
+
+  setBusy(elements.installUpdateButton, true, '下载并校验中…')
+  elements.checkUpdateButton.disabled = true
+  elements.updateStatus.textContent = elements.updateProxy.checked
+    ? '正在通过 GitHub 加速地址下载并校验更新包…'
+    : '正在直接从 GitHub 下载并校验更新包…'
+  elements.updateTarget.textContent = '校验成功后程序会自动退出、停止同路径进程并完成替换。'
+  try {
+    await invoke('save_update_proxy', { enabled: elements.updateProxy.checked })
+    await invoke('install_update', { useProxy: elements.updateProxy.checked })
+    elements.updateStatus.textContent = '更新包已验证，正在退出并安装…'
+  }
+  catch (error) {
+    showMessage(String(error), { type: 'error', title: '自动更新失败', duration: 10000 })
+    elements.updateStatus.textContent = '更新未执行，当前版本保持不变。'
+    elements.updateTarget.textContent = String(error)
+    setBusy(elements.installUpdateButton, false)
+    elements.checkUpdateButton.disabled = false
+  }
 }
 
 function renderProfile(profile) {
@@ -411,7 +541,7 @@ async function saveSettings() {
     const result = await invoke('save_settings', settingsPayload())
     fillSettings(result)
     elements.serverToken.value = ''
-    showMessage('服务器地址、同步选项和本地设置均已更新。', { type: 'success', title: '设置已保存' })
+    showMessage('服务器地址、同步选项、更新下载方式和本地设置均已更新。', { type: 'success', title: '设置已保存' })
   }
   catch (error) {
     showMessage(String(error), { type: 'error', title: '保存设置失败' })
@@ -575,6 +705,7 @@ async function bootstrap() {
     showMessage(data.startup_warning, { type: 'error', title: '启动时发现网络恢复问题', duration: 10000 })
   await listen('capture-status', event => renderStatus(event.payload, { notify: true }))
   startIdentityMonitor()
+  void checkForUpdate({ silent: true })
 }
 
 elements.saveButton.addEventListener('click', saveSettings)
@@ -582,8 +713,11 @@ elements.testButton.addEventListener('click', testConnection)
 elements.startButton.addEventListener('click', startCapture)
 elements.stopButton.addEventListener('click', stopCapture)
 elements.cleanupButton.addEventListener('click', cleanupNetwork)
+elements.checkUpdateButton.addEventListener('click', () => checkForUpdate())
 elements.copyButton.addEventListener('click', copyCode)
 elements.detectQqButton.addEventListener('click', () => detectLocalQq())
+elements.installUpdateButton.addEventListener('click', installUpdate)
+elements.updateProxy.addEventListener('change', saveUpdateProxyPreference)
 elements.toggleToken.addEventListener('click', () => {
   const hidden = elements.serverToken.type === 'password'
   elements.serverToken.type = hidden ? 'text' : 'password'

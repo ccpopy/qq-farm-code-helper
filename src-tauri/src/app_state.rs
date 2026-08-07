@@ -101,6 +101,10 @@ impl AppCore {
         self.settings.token()
     }
 
+    pub fn set_update_proxy(&self, enabled: bool) -> Result<(), String> {
+        self.settings.set_update_proxy(enabled)
+    }
+
     pub async fn start_capture(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
         self.ensure_not_running().await?;
         let settings = self.settings.load()?;

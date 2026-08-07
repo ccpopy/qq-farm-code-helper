@@ -26,6 +26,14 @@
 
 农场窗口当次出现网络错误是预期现象：官方的 WebSocket 登录请求被本地工具主动阻断，避免一次性 Code 被官方客户端先消耗。
 
+## 应用更新
+
+- 应用启动后会检查本项目最新的稳定版 GitHub Release，也可以在“应用更新”面板中手动检查。
+- Release 下载默认通过 `https://gh.lessdo.top/原始GitHub地址` 加速；关闭“使用 GitHub 加速”后会直接从 GitHub 下载。
+- 下载完成后必须通过 GitHub Release API 返回的官方 SHA-256 校验，校验失败不会执行更新包。
+- 使用安装版时，会将新版静默安装到当前 EXE 所在目录；例如当前位于 `D:\Tools\QQFarm`，更新仍安装到该目录。
+- 使用便携版时，会在程序退出后原地替换当前 EXE。安装前会停止同路径残留进程，完成后自动重新启动。
+
 ## 本地身份识别
 
 - 工具通过 Windows UI Automation 读取新版客户端主窗口左上角当前昵称，再与本地登录索引中的 `uin`、`nickName` 和 `faceUrl` 做唯一匹配，不读取聊天数据库。
@@ -54,7 +62,7 @@
 
 ## GitHub Release
 
-推送 `v*` 格式的 Tag（例如 `v0.1.4`）会触发 GitHub Actions，在对应 Release 中自动提供：
+推送 `v*` 格式的 Tag（例如 `v0.1.5`）会触发 GitHub Actions，在对应 Release 中自动提供：
 
 - 单文件便携版；
 - Windows NSIS 安装包。

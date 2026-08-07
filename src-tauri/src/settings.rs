@@ -14,6 +14,7 @@ pub struct AppSettings {
     pub qq_number: String,
     pub auto_sync: bool,
     pub proxy_port: u16,
+    pub update_proxy: bool,
 }
 
 impl Default for AppSettings {
@@ -24,6 +25,7 @@ impl Default for AppSettings {
             qq_number: String::new(),
             auto_sync: true,
             proxy_port: 8899,
+            update_proxy: true,
         }
     }
 }
@@ -84,6 +86,12 @@ impl SettingsStore {
             Ok(_) | Err(KeyringError::NoEntry) => Ok(None),
             Err(error) => Err(keyring_error(error)),
         }
+    }
+
+    pub fn set_update_proxy(&self, enabled: bool) -> Result<(), String> {
+        let mut settings = self.load()?;
+        settings.update_proxy = enabled;
+        write_settings_atomic(&self.path, &settings)
     }
 
     fn view_with(&self, settings: AppSettings) -> Result<SettingsView, String> {
@@ -167,5 +175,46 @@ mod tests {
             ..AppSettings::default()
         };
         assert!(normalize_settings(&mut settings).is_err());
+    }
+
+    #[test]
+    fn enables_the_release_download_proxy_by_default() {
+        assert!(AppSettings::default().update_proxy);
+    }
+
+    #[test]
+    fn old_settings_files_enable_the_release_download_proxy() {
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"server_url":"","account_name":"Windows QQ","qq_number":"","auto_sync":true,"proxy_port":8899}"#,
+        )
+        .unwrap();
+
+        assert!(settings.update_proxy);
+    }
+
+    #[test]
+    fn saves_the_update_proxy_without_changing_server_settings() {
+        let directory = std::env::temp_dir().join(format!(
+            "qq-farm-code-helper-settings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let store = SettingsStore::new(directory.clone());
+        let settings = AppSettings {
+            server_url: "https://farm.example.com".to_owned(),
+            ..AppSettings::default()
+        };
+        write_settings_atomic(&store.path, &settings).unwrap();
+
+        store.set_update_proxy(false).unwrap();
+
+        let saved = store.load().unwrap();
+        assert!(!saved.update_proxy);
+        assert_eq!(saved.server_url, "https://farm.example.com");
+        fs::remove_dir_all(directory).unwrap();
     }
 }

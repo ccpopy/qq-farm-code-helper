@@ -10,6 +10,8 @@ mod server_sync;
 mod settings;
 mod status;
 mod system_proxy;
+mod update_installer;
+mod updater;
 mod windows;
 
 use app_state::AppCore;
@@ -92,6 +94,9 @@ fn main() {
             commands::cleanup_network,
             commands::get_captured_code,
             commands::detect_local_qq,
+            commands::check_for_update,
+            commands::save_update_proxy,
+            commands::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build QQ Farm Code Helper");
