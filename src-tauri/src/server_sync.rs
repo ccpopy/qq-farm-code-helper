@@ -162,8 +162,11 @@ impl ServerClient {
                 .ok_or_else(|| "服务器没有返回可识别的账号 ID".to_owned())?
         };
 
+        self.start_account(server_url, token, &profile.account_id)
+            .await?;
+
         for _ in 0..30 {
-            if profile.has_game_identity() {
+            if profile.running && profile.has_game_identity() {
                 break;
             }
             sleep(Duration::from_millis(500)).await;
@@ -175,6 +178,28 @@ impl ServerClient {
             }
         }
         Ok(profile)
+    }
+
+    async fn start_account(
+        &self,
+        server_url: &str,
+        token: &str,
+        account_id: &str,
+    ) -> Result<(), String> {
+        let path = format!("/api/accounts/{account_id}/start");
+        let endpoint = endpoint(server_url, &path)
+            .map_err(|error| format!("Code 已同步，但自动启动远程账号失败: {error}"))?;
+        let response = self
+            .client
+            .post(endpoint)
+            .header("x-admin-token", token)
+            .send()
+            .await
+            .map_err(|error| format!("Code 已同步，但自动启动远程账号失败: {error}"))?;
+        parse_response(response)
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("Code 已同步，但自动启动远程账号失败: {error}"))
     }
 
     async fn get_account_profile(
@@ -389,6 +414,7 @@ mod tests {
             r#"{"ok":true,"data":{"username":"admin","role":"admin"}}"#,
             r#"{"ok":true,"data":{"accounts":[],"nextId":7}}"#,
             r#"{"ok":true,"data":{"accounts":[{"id":"7","name":"Windows QQ","username":"admin","nick":"测试农夫","uin":"12345678","gid":1027000001,"openId":"openid-test","avatar":"https://example.com/avatar.png","running":true}]}}"#,
+            r#"{"ok":true}"#,
         ])
         .await;
 
@@ -411,7 +437,7 @@ mod tests {
         assert_eq!(profile.gid, "1027000001");
         assert_eq!(profile.qq_number, "12345678");
         let requests = request_receiver.await.unwrap();
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 4);
         assert!(requests[0].starts_with("GET /api/user/me HTTP/1.1"));
         assert!(requests[1].starts_with("GET /api/accounts HTTP/1.1"));
         let request = &requests[2];
@@ -427,6 +453,12 @@ mod tests {
         assert!(request.contains("\"nick\":\"本机昵称\""));
         assert!(request.contains("example.com/local-avatar.png"));
         assert!(!request.contains("\"id\":"));
+        assert!(requests[3].starts_with("POST /api/accounts/7/start HTTP/1.1"));
+        assert!(
+            requests[3]
+                .to_ascii_lowercase()
+                .contains("x-admin-token: synthetic-token")
+        );
     }
 
     #[tokio::test]
@@ -435,6 +467,8 @@ mod tests {
             r#"{"ok":true,"data":{"username":"admin","role":"admin"}}"#,
             r#"{"ok":true,"data":{"accounts":[{"id":"2","name":"主号原配置","username":"admin","platform":"qq","uin":"12345678","running":false},{"id":"7","name":"重复账号","username":"admin","platform":"qq","uin":"12345678","running":true},{"id":"8","name":"其他用户账号","username":"alice","platform":"qq","uin":"12345678","running":true}]}}"#,
             r#"{"ok":true,"data":{"accounts":[{"id":"2","name":"主号原配置","username":"admin","platform":"qq","nick":"测试农夫","uin":"12345678","gid":1027000001,"openId":"openid-test","running":false},{"id":"7","name":"重复账号","username":"admin","platform":"qq","uin":"12345678","running":true}]}}"#,
+            r#"{"ok":true}"#,
+            r#"{"ok":true,"data":{"accounts":[{"id":"2","name":"主号原配置","username":"admin","platform":"qq","nick":"测试农夫","uin":"12345678","gid":1027000001,"openId":"openid-test","running":true},{"id":"7","name":"重复账号","username":"admin","platform":"qq","uin":"12345678","running":true}]}}"#,
         ])
         .await;
 
@@ -456,12 +490,15 @@ mod tests {
 
         assert_eq!(profile.account_id, "2");
         assert_eq!(profile.account_name, "主号原配置");
+        assert!(profile.running);
         let requests = request_receiver.await.unwrap();
         let request = &requests[2];
         assert!(request.contains("\"id\":\"2\""));
         assert!(request.contains("\"name\":\"主号原配置\""));
         assert!(request.contains("\"code\":\"newcode0123456789abcdef0123456789\""));
         assert!(!request.contains("\"id\":\"7\""));
+        assert!(requests[3].starts_with("POST /api/accounts/2/start HTTP/1.1"));
+        assert!(requests[4].starts_with("GET /api/accounts HTTP/1.1"));
     }
 
     #[tokio::test]
@@ -470,6 +507,7 @@ mod tests {
             r#"{"ok":true,"data":{"username":"admin","role":"admin"}}"#,
             r#"{"ok":true,"data":{"accounts":[{"id":"5","name":"其他用户账号","username":"alice","platform":"qq","uin":"12345678","running":true}]}}"#,
             r#"{"ok":true,"data":{"accounts":[{"id":"5","name":"其他用户账号","username":"alice","platform":"qq","uin":"12345678","running":true},{"id":"6","name":"Windows QQ","username":"admin","platform":"qq","nick":"测试农夫","uin":"12345678","gid":1027000001,"openId":"openid-new","running":true}]}}"#,
+            r#"{"ok":true}"#,
         ])
         .await;
 
@@ -492,6 +530,39 @@ mod tests {
         assert_eq!(profile.account_id, "6");
         let requests = request_receiver.await.unwrap();
         assert!(!requests[2].contains("\"id\":"));
+        assert!(requests[3].starts_with("POST /api/accounts/6/start HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn sync_reports_when_account_was_saved_but_auto_start_failed() {
+        let (server_url, _request_receiver) = serve_http_responses(vec![
+            r#"{"ok":true,"data":{"username":"admin","role":"admin"}}"#,
+            r#"{"ok":true,"data":{"accounts":[],"nextId":7}}"#,
+            r#"{"ok":true,"data":{"accounts":[{"id":"7","name":"Windows QQ","username":"admin","uin":"12345678","running":false}]}}"#,
+            r#"{"ok":false,"error":"Account not found"}"#,
+        ])
+        .await;
+
+        let error = ServerClient::new()
+            .unwrap()
+            .sync_code(
+                &server_url,
+                "synthetic-token",
+                SyncAccountInput {
+                    account_name: "Windows QQ",
+                    qq_number: "12345678",
+                    nickname: "本机昵称",
+                    avatar_url: "",
+                    code: "newcode0123456789abcdef0123456789",
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "Code 已同步，但自动启动远程账号失败: Account not found"
+        );
     }
 
     #[tokio::test]
