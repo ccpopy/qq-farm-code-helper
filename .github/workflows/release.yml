@@ -57,8 +57,34 @@ jobs:
           Copy-Item -LiteralPath $setupSource.FullName -Destination "dist\QQFarmCodeHelper-$tag-setup.exe"
           Get-FileHash -Algorithm SHA256 -Path 'dist\*.exe' | Format-Table -AutoSize
 
+      - name: Prepare release notes
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:RELEASE_TAG
+          $escapedTag = [Regex]::Escape($tag)
+          $changelog = Get-Content -LiteralPath CHANGELOG.md -Raw -Encoding UTF8
+          $section = [Regex]::Match(
+            $changelog,
+            "(?ms)^##\s+$escapedTag\s*\r?\n(?<body>.*?)(?=^##\s+|\z)"
+          )
+
+          if (-not $section.Success) {
+            throw "CHANGELOG.md does not contain a section for $tag"
+          }
+
+          $notes = "## $tag`r`n`r`n$($section.Groups['body'].Value.Trim())`r`n"
+          [IO.File]::WriteAllText(
+            (Join-Path $PWD 'dist\release-notes.md'),
+            $notes,
+            [Text.UTF8Encoding]::new($false)
+          )
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: dist/release-notes.md
           generate_release_notes: true
           files: dist/*.exe
