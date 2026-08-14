@@ -3,7 +3,7 @@ use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     KeyPair, KeyUsagePurpose,
 };
-use rustls::ServerConfig;
+use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::{fs, path::PathBuf, sync::Arc};
 
@@ -133,6 +133,15 @@ pub fn generate_tls_material() -> Result<TlsMaterial, String> {
         ca_der: ca_cert.der().to_vec(),
         server_config: Arc::new(config),
     })
+}
+
+pub fn upstream_client_config() -> Arc<ClientConfig> {
+    let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Arc::new(config)
 }
 
 fn ca_params() -> CertificateParams {

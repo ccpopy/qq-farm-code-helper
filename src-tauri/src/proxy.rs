@@ -1,5 +1,8 @@
-use crate::certificates::TARGET_HOST;
-use rustls::ServerConfig;
+use crate::{
+    certificates::{TARGET_HOST, upstream_client_config},
+    friend_proxy,
+};
+use rustls::{ClientConfig, ServerConfig};
 use std::{
     fs::OpenOptions,
     io::Write,
@@ -12,6 +15,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional},
     net::{TcpListener, TcpStream},
     sync::mpsc,
+    task::JoinSet,
     time::timeout,
 };
 use tokio_rustls::TlsAcceptor;
@@ -20,6 +24,17 @@ use url::Url;
 
 const MAX_HEADER_SIZE: usize = 32 * 1024;
 const TARGET_PATH: &str = "/prod/ws";
+
+#[derive(Clone)]
+pub enum ProxyMode {
+    CaptureCode {
+        captured: mpsc::Sender<String>,
+        diagnostics_path: Option<PathBuf>,
+    },
+    SyncFriends {
+        captured: mpsc::Sender<Vec<String>>,
+    },
+}
 
 pub async fn bind(port: u16) -> Result<TcpListener, String> {
     TcpListener::bind(("127.0.0.1", port))
@@ -31,27 +46,44 @@ pub async fn run(
     listener: TcpListener,
     tls_config: Arc<ServerConfig>,
     cancellation: CancellationToken,
-    captured: mpsc::Sender<String>,
-    diagnostics_path: Option<PathBuf>,
+    mode: ProxyMode,
 ) {
+    let upstream_tls = matches!(mode, ProxyMode::SyncFriends { .. }).then(upstream_client_config);
+    let mut connections = JoinSet::new();
     loop {
-        let accepted = tokio::select! {
+        tokio::select! {
             _ = cancellation.cancelled() => break,
-            result = listener.accept() => result,
-        };
-        let Ok((stream, peer)) = accepted else {
-            continue;
-        };
-        let tls_config = tls_config.clone();
-        let captured = captured.clone();
-        let diagnostics_path = diagnostics_path.clone();
-        tokio::spawn(async move {
-            if let Err(error) =
-                handle_client(stream, peer, tls_config, captured, diagnostics_path).await
-            {
-                eprintln!("proxy connection closed: {error}");
+            accepted = listener.accept() => {
+                let Ok((stream, peer)) = accepted else {
+                    continue;
+                };
+                let tls_config = tls_config.clone();
+                let mode = mode.clone();
+                let upstream_tls = upstream_tls.clone();
+                let connection_cancellation = cancellation.clone();
+                connections.spawn(async move {
+                    tokio::select! {
+                        _ = connection_cancellation.cancelled() => Ok(()),
+                        result = handle_client(stream, peer, tls_config, mode, upstream_tls) => result,
+                    }
+                });
             }
-        });
+            result = connections.join_next(), if !connections.is_empty() => {
+                report_connection_result(result);
+            }
+        }
+    }
+    cancellation.cancel();
+    while let Some(result) = connections.join_next().await {
+        report_connection_result(Some(result));
+    }
+}
+
+fn report_connection_result(result: Option<Result<Result<(), String>, tokio::task::JoinError>>) {
+    match result {
+        Some(Ok(Err(error))) => eprintln!("proxy connection closed: {error}"),
+        Some(Err(error)) if !error.is_cancelled() => eprintln!("proxy task failed: {error}"),
+        _ => {}
     }
 }
 
@@ -59,15 +91,15 @@ async fn handle_client(
     mut client: TcpStream,
     _peer: SocketAddr,
     tls_config: Arc<ServerConfig>,
-    captured: mpsc::Sender<String>,
-    diagnostics_path: Option<PathBuf>,
+    mode: ProxyMode,
+    upstream_tls: Option<Arc<ClientConfig>>,
 ) -> Result<(), String> {
     let headers = read_headers(&mut client).await?;
     let request = ParsedRequest::parse(&headers)?;
     if request.method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = parse_authority(&request.target)?;
         if host.eq_ignore_ascii_case(TARGET_HOST) && port == 443 {
-            return intercept_target(client, tls_config, captured, diagnostics_path).await;
+            return intercept_target(client, tls_config, mode, upstream_tls).await;
         }
         return tunnel_connect(client, &host, port).await;
     }
@@ -77,23 +109,38 @@ async fn handle_client(
 async fn intercept_target(
     mut client: TcpStream,
     tls_config: Arc<ServerConfig>,
-    captured: mpsc::Sender<String>,
-    diagnostics_path: Option<PathBuf>,
+    mode: ProxyMode,
+    upstream_tls: Option<Arc<ClientConfig>>,
 ) -> Result<(), String> {
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await
         .map_err(|error| format!("写入 CONNECT 响应失败: {error}"))?;
-    let mut tls = TlsAcceptor::from(tls_config)
-        .accept(client)
-        .await
-        .map_err(|error| format!("QQ TLS 握手失败: {error}"))?;
+    let mut tls = timeout(
+        Duration::from_secs(15),
+        TlsAcceptor::from(tls_config).accept(client),
+    )
+    .await
+    .map_err(|_| "等待 QQ TLS 握手超时".to_owned())?
+    .map_err(|error| format!("QQ TLS 握手失败: {error}"))?;
     let headers = read_headers(&mut tls).await?;
-    let request = ParsedRequest::parse(&headers)?;
-    log_target_request_diagnostics(&headers, &request, diagnostics_path.as_deref());
-    let code = extract_farm_code(&request.target, &request.host)?;
-    let _ = captured.try_send(code);
-    write_blocked_response(&mut tls).await
+    match mode {
+        ProxyMode::CaptureCode {
+            captured,
+            diagnostics_path,
+        } => {
+            let request = ParsedRequest::parse(&headers)?;
+            log_target_request_diagnostics(&headers, &request, diagnostics_path.as_deref());
+            let code = extract_farm_code(&request.target, &request.host)?;
+            let _ = captured.try_send(code);
+            write_blocked_response(&mut tls).await
+        }
+        ProxyMode::SyncFriends { captured } => {
+            let upstream_tls =
+                upstream_tls.ok_or_else(|| "好友同步缺少上游 TLS 配置".to_owned())?;
+            friend_proxy::relay_target_websocket(tls, headers, upstream_tls, captured).await
+        }
+    }
 }
 
 fn log_target_request_diagnostics(headers: &[u8], request: &ParsedRequest, path: Option<&Path>) {
@@ -210,7 +257,7 @@ async fn forward_http(
     Ok(())
 }
 
-async fn read_headers<S>(stream: &mut S) -> Result<Vec<u8>, String>
+pub(crate) async fn read_headers<S>(stream: &mut S) -> Result<Vec<u8>, String>
 where
     S: AsyncRead + Unpin,
 {
@@ -411,8 +458,10 @@ mod tests {
             listener,
             material.server_config,
             cancellation.clone(),
-            sender,
-            None,
+            ProxyMode::CaptureCode {
+                captured: sender,
+                diagnostics_path: None,
+            },
         ));
 
         let client = reqwest::Client::builder()

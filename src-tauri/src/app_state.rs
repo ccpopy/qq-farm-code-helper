@@ -1,8 +1,8 @@
 use crate::{
     certificates::CertificateManager,
-    proxy,
+    proxy::{self, ProxyMode},
     qq_identity::{self, LocalQqIdentity},
-    server_sync::{ServerClient, SyncAccountInput},
+    server_sync::{FriendSyncResult, ServerClient, SyncAccountInput},
     settings::{AppSettings, SettingsStore, SettingsView},
     status::StatusPayload,
     system_proxy::SystemProxyManager,
@@ -25,9 +25,12 @@ use tokio_util::sync::CancellationToken;
 const INITIAL_IDENTITY_WARNING: &str = "代理已启动，但捕获 Code 前尚未稳定确认 Windows QQ";
 
 struct RuntimeState {
+    starting: bool,
     cancellation: Option<CancellationToken>,
     task: Option<JoinHandle<()>>,
+    capture_task: Option<JoinHandle<()>>,
     identity_task: Option<JoinHandle<()>>,
+    friend_sync_active: bool,
     last_code: Option<String>,
     locked_identity: Option<LocalQqIdentity>,
     identity_warning: Option<String>,
@@ -37,9 +40,12 @@ struct RuntimeState {
 impl Default for RuntimeState {
     fn default() -> Self {
         Self {
+            starting: false,
             cancellation: None,
             task: None,
+            capture_task: None,
             identity_task: None,
+            friend_sync_active: false,
             last_code: None,
             locked_identity: None,
             identity_warning: None,
@@ -106,7 +112,13 @@ impl AppCore {
     }
 
     pub async fn start_capture(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
-        self.ensure_not_running().await?;
+        self.begin_start().await?;
+        let result = self.start_capture_inner(app).await;
+        self.runtime.lock().await.starting = false;
+        result
+    }
+
+    async fn start_capture_inner(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
         let settings = self.settings.load()?;
         self.validate_sync_settings(&settings)?;
         self.publish(
@@ -120,7 +132,10 @@ impl AppCore {
         )
         .await;
 
-        let tls = self.prepare_certificate().await?;
+        let tls = match self.prepare_certificate().await {
+            Ok(tls) => tls,
+            Err(error) => return Err(self.record_failure(&app, error, false).await),
+        };
         let listener = match proxy::bind(settings.proxy_port).await {
             Ok(listener) => listener,
             Err(error) => {
@@ -132,18 +147,17 @@ impl AppCore {
         let identity_cancellation = cancellation.clone();
         let (sender, receiver) = mpsc::channel(1);
         let _ = std::fs::remove_file(&self.diagnostics_path);
-        let task = tokio::spawn(proxy::run(
-            listener,
-            tls,
-            cancellation.clone(),
-            sender,
-            Some(self.diagnostics_path.clone()),
-        ));
+        let mode = ProxyMode::CaptureCode {
+            captured: sender,
+            diagnostics_path: Some(self.diagnostics_path.clone()),
+        };
+        let task = tokio::spawn(proxy::run(listener, tls, cancellation.clone(), mode));
         self.store_transport(
             cancellation,
             task,
             None,
             Some(INITIAL_IDENTITY_WARNING.to_owned()),
+            false,
         )
         .await;
 
@@ -163,21 +177,107 @@ impl AppCore {
         .await;
         self.start_identity_monitor(app.clone(), identity_cancellation)
             .await;
-        self.spawn_capture_handler(app, receiver);
+        self.spawn_capture_handler(app, receiver).await;
+        Ok(())
+    }
+
+    pub async fn start_friend_sync(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
+        self.begin_start().await?;
+        let result = self.start_friend_sync_inner(app.clone()).await;
+        self.runtime.lock().await.starting = false;
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.record_failure(&app, error, false).await),
+        }
+    }
+
+    async fn start_friend_sync_inner(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
+        let settings = self.settings.load()?;
+        self.validate_friend_sync_settings(&settings)?;
+        self.publish(
+            &app,
+            StatusPayload::new(
+                "preparing_friend_sync",
+                "正在确认好友同步账号",
+                "确认本机 Windows QQ 与远程运行账号一致…",
+                false,
+            ),
+        )
+        .await;
+
+        let locked_identity = detect_current_qq_with_retry(2)
+            .await
+            .map_err(|error| format!("无法确认当前 Windows QQ：{error}"))?;
+        let token = self
+            .settings
+            .token()?
+            .ok_or_else(|| "同步官方好友前必须填写后台登录 Token".to_owned())?;
+        let target = ServerClient::new()?
+            .friend_sync_target(&settings.server_url, &token, &locked_identity.qq_number)
+            .await?;
+
+        let tls = match self.prepare_certificate().await {
+            Ok(tls) => tls,
+            Err(error) => return Err(self.record_failure(&app, error, false).await),
+        };
+        let listener = match proxy::bind(settings.proxy_port).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                let _ = self.cleanup_certificate().await;
+                return Err(self.record_failure(&app, error, false).await);
+            }
+        };
+        let cancellation = CancellationToken::new();
+        let (sender, receiver) = mpsc::channel(1);
+        let task = tokio::spawn(proxy::run(
+            listener,
+            tls,
+            cancellation.clone(),
+            ProxyMode::SyncFriends { captured: sender },
+        ));
+        self.store_transport(cancellation, task, Some(locked_identity), None, true)
+            .await;
+
+        if let Err(error) = self.enable_system_proxy(settings.proxy_port).await {
+            let _ = self.stop_transport().await;
+            return Err(self.record_failure(&app, error, false).await);
+        }
+        self.publish(
+            &app,
+            StatusPayload::new(
+                "waiting_friend_sync",
+                "等待官方好友数据",
+                "请重新进入 QQ 农场；本次官方登录会正常完成。助手捕获到 SyncAll 好友列表后会自动恢复网络并同步到远程账号。",
+                false,
+            )
+            .with_profile(target.clone()),
+        )
+        .await;
+        self.spawn_friend_sync_handler(app, receiver, target).await;
         Ok(())
     }
 
     pub async fn stop_capture(&self, app: &AppHandle) -> Result<(), String> {
+        let was_friend_sync = self.runtime.lock().await.friend_sync_active;
         self.stop_transport().await?;
         self.clear_capture_identity().await;
         self.publish(
             app,
-            StatusPayload::new(
-                "stopped",
-                "已停止",
-                "系统代理和临时证书已恢复。",
-                self.has_code().await,
-            ),
+            if was_friend_sync {
+                StatusPayload::new(
+                    "stopped",
+                    "好友同步已停止",
+                    "系统代理和临时证书已恢复，没有保留本次好友数据。",
+                    self.has_code().await,
+                )
+            } else {
+                StatusPayload::new(
+                    "stopped",
+                    "已停止",
+                    "系统代理和临时证书已恢复。",
+                    self.has_code().await,
+                )
+            },
         )
         .await;
         Ok(())
@@ -214,17 +314,149 @@ impl AppCore {
         let _ = self.recover_network().await;
     }
 
-    fn spawn_capture_handler(
+    async fn spawn_capture_handler(
         self: &Arc<Self>,
         app: AppHandle,
         mut receiver: mpsc::Receiver<String>,
     ) {
         let core = self.clone();
-        tokio::spawn(async move {
+        let mut runtime = self.runtime.lock().await;
+        let task = tokio::spawn(async move {
             if let Some(code) = receiver.recv().await {
                 core.handle_captured_code(app, code).await;
             }
         });
+        runtime.capture_task = Some(task);
+    }
+
+    async fn spawn_friend_sync_handler(
+        self: &Arc<Self>,
+        app: AppHandle,
+        mut receiver: mpsc::Receiver<Vec<String>>,
+        target: crate::server_sync::AccountProfile,
+    ) {
+        let core = self.clone();
+        let mut runtime = self.runtime.lock().await;
+        let task = tokio::spawn(async move {
+            if let Some(open_ids) = receiver.recv().await {
+                core.handle_captured_friend_ids(app, open_ids, target).await;
+            }
+        });
+        runtime.capture_task = Some(task);
+    }
+
+    async fn handle_captured_friend_ids(
+        &self,
+        app: AppHandle,
+        open_ids: Vec<String>,
+        target: crate::server_sync::AccountProfile,
+    ) {
+        self.publish(
+            &app,
+            StatusPayload::new(
+                "syncing_friends",
+                "已获取官方好友列表",
+                format!(
+                    "已从 SyncAll 响应提取 {} 个好友标识，正在恢复网络并同步远程账号…",
+                    open_ids.len()
+                ),
+                self.has_code().await,
+            )
+            .with_profile(target.clone()),
+        )
+        .await;
+
+        if let Err(error) = self.stop_proxy_transport().await {
+            self.record_failure(&app, error, self.has_code().await)
+                .await;
+            return;
+        }
+        if let Err(reason) = self.confirm_friend_sync_identity(&target).await {
+            self.publish_friend_identity_rejected(&app, reason).await;
+            return;
+        }
+
+        match self
+            .send_friend_open_ids(&target.account_id, &open_ids)
+            .await
+        {
+            Ok(result) => {
+                self.publish_friend_sync_completed(&app, target, result)
+                    .await
+            }
+            Err(error) => {
+                self.record_failure(
+                    &app,
+                    format!("好友同步失败，好友标识已从内存丢弃: {error}"),
+                    self.has_code().await,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn confirm_friend_sync_identity(
+        &self,
+        target: &crate::server_sync::AccountProfile,
+    ) -> Result<(), String> {
+        self.revalidate_capture_identity().await;
+        let (locked_identity, identity_warning) = self.capture_identity().await;
+        let locked_identity = locked_identity
+            .ok_or_else(|| identity_warning.unwrap_or_else(|| "无法再次确认当前 QQ".to_owned()))?;
+        if locked_identity.qq_number != target.qq_number {
+            return Err("本机 QQ 与同步前确认的远程账号不一致".to_owned());
+        }
+        Ok(())
+    }
+
+    async fn send_friend_open_ids(
+        &self,
+        account_id: &str,
+        open_ids: &[String],
+    ) -> Result<FriendSyncResult, String> {
+        let settings = self.settings.load()?;
+        let token = self
+            .settings
+            .token()?
+            .ok_or_else(|| "后台登录 Token 已不存在".to_owned())?;
+        ServerClient::new()?
+            .sync_friend_open_ids(&settings.server_url, &token, account_id, open_ids)
+            .await
+    }
+
+    async fn publish_friend_identity_rejected(&self, app: &AppHandle, reason: String) {
+        self.publish(
+            app,
+            StatusPayload::new(
+                "friend_identity_changed",
+                "未同步：QQ 账号已变化",
+                format!("好友标识已从内存丢弃，没有上传服务器。{reason}"),
+                self.has_code().await,
+            ),
+        )
+        .await;
+    }
+
+    async fn publish_friend_sync_completed(
+        &self,
+        app: &AppHandle,
+        target: crate::server_sync::AccountProfile,
+        result: FriendSyncResult,
+    ) {
+        self.publish(
+            app,
+            StatusPayload::new(
+                "friends_synced",
+                "官方好友同步完成",
+                format!(
+                    "远程账号已接收 {} 个好友标识，SyncAll 返回 {} 位游戏好友；数据未在 Helper 中落盘。",
+                    result.received_count, result.friend_count
+                ),
+                self.has_code().await,
+            )
+            .with_profile(target),
+        )
+        .await;
     }
 
     async fn handle_captured_code(&self, app: AppHandle, code: String) {
@@ -240,7 +472,7 @@ impl AppCore {
         )
         .await;
 
-        if let Err(error) = self.stop_transport().await {
+        if let Err(error) = self.stop_proxy_transport().await {
             self.record_failure(&app, error, false).await;
             return;
         }
@@ -359,12 +591,20 @@ impl AppCore {
             .await
     }
 
-    async fn ensure_not_running(&self) -> Result<(), String> {
-        if self.runtime.lock().await.cancellation.is_some() {
-            Err("获取任务已经在运行".to_owned())
-        } else {
-            Ok(())
+    async fn begin_start(&self) -> Result<(), String> {
+        let mut runtime = self.runtime.lock().await;
+        if runtime.starting
+            || runtime.cancellation.is_some()
+            || runtime
+                .capture_task
+                .as_ref()
+                .is_some_and(|task| !task.is_finished())
+        {
+            return Err("本地代理任务已经在运行".to_owned());
         }
+        runtime.capture_task = None;
+        runtime.starting = true;
+        Ok(())
     }
 
     fn validate_sync_settings(&self, settings: &AppSettings) -> Result<(), String> {
@@ -379,25 +619,68 @@ impl AppCore {
         Ok(())
     }
 
+    fn validate_friend_sync_settings(&self, settings: &AppSettings) -> Result<(), String> {
+        if settings.server_url.is_empty() {
+            return Err("同步官方好友前必须填写服务器地址".to_owned());
+        }
+        if self.settings.token()?.is_none() {
+            return Err("同步官方好友前必须填写后台登录 Token".to_owned());
+        }
+        Ok(())
+    }
+
     async fn store_transport(
         &self,
         cancellation: CancellationToken,
         task: JoinHandle<()>,
         locked_identity: Option<LocalQqIdentity>,
         identity_warning: Option<String>,
+        friend_sync_active: bool,
     ) {
         let mut runtime = self.runtime.lock().await;
         runtime.cancellation = Some(cancellation);
         runtime.task = Some(task);
+        runtime.friend_sync_active = friend_sync_active;
         runtime.identity_task = None;
-        runtime.last_code = None;
+        if !friend_sync_active {
+            runtime.last_code = None;
+        }
         runtime.locked_identity = locked_identity;
         runtime.identity_warning = identity_warning;
     }
 
     async fn stop_transport(&self) -> Result<(), String> {
+        let (cancellation, task, capture_task, identity_task) = {
+            let mut runtime = self.runtime.lock().await;
+            runtime.friend_sync_active = false;
+            (
+                runtime.cancellation.take(),
+                runtime.task.take(),
+                runtime.capture_task.take(),
+                runtime.identity_task.take(),
+            )
+        };
+        if let Some(cancellation) = cancellation {
+            cancellation.cancel();
+        }
+        if let Some(task) = identity_task {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = capture_task {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+        self.recover_network().await
+    }
+
+    async fn stop_proxy_transport(&self) -> Result<(), String> {
         let (cancellation, task, identity_task) = {
             let mut runtime = self.runtime.lock().await;
+            runtime.friend_sync_active = false;
             (
                 runtime.cancellation.take(),
                 runtime.task.take(),
@@ -708,5 +991,13 @@ mod tests {
 
         assert!(detail.contains("已稳定确认并锁定"));
         assert!(!detail.contains("切换"));
+    }
+
+    #[tokio::test]
+    async fn start_reservation_is_atomic() {
+        let core = AppCore::new(std::env::temp_dir().join("qq-farm-start-reservation-test"));
+
+        assert!(core.begin_start().await.is_ok());
+        assert!(core.begin_start().await.is_err());
     }
 }

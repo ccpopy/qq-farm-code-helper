@@ -62,11 +62,31 @@
               </li>
             </ol>
 
+            <ol class="stage-list hidden" id="friendStageList">
+              <li data-stage="preparing_friend_sync">
+                <span class="stage-index">01</span>
+                <span><strong>确认账号</strong><small>仅匹配已有账号</small></span>
+              </li>
+              <li data-stage="waiting_friend_sync">
+                <span class="stage-index">02</span>
+                <span><strong>官方登录</strong><small>正常进入农场</small></span>
+              </li>
+              <li data-stage="syncing_friends">
+                <span class="stage-index">03</span>
+                <span><strong>获取好友</strong><small>读取 SyncAll</small></span>
+              </li>
+              <li data-stage="friends_synced">
+                <span class="stage-index">04</span>
+                <span><strong>刷新远程</strong><small>不在本地落盘</small></span>
+              </li>
+            </ol>
+
             <div class="action-row">
-              <button class="primary-action" id="startButton" type="button">
+              <button class="primary-action" id="startButton" type="button" disabled>
                 <span class="button-dot"></span>
                 <span id="startButtonText">启动获取</span>
               </button>
+              <button class="secondary-action" id="syncFriendsButton" type="button" disabled>同步官方好友</button>
               <button class="secondary-action" id="stopButton" type="button" disabled>停止并恢复网络</button>
               <button class="secondary-action hidden" id="copyButton" type="button">复制 Code</button>
             </div>
@@ -184,7 +204,7 @@
 
         <footer class="privacy-note reveal reveal-4">
           <span>●</span>
-          <p>Code 只保存在内存中；结束后自动恢复系统代理并移除临时证书。</p>
+          <p id="privacyNote">Code 与好友 OpenID 只在任务期间保存在内存中；结束后自动恢复系统代理并移除临时证书。</p>
         </footer>
       </main>
     </div>

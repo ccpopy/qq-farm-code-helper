@@ -60,6 +60,19 @@ pub struct SyncAccountInput<'a> {
     pub code: &'a str,
 }
 
+#[derive(Debug, Serialize)]
+struct FriendOpenIdsPayload<'a> {
+    #[serde(rename = "openIds")]
+    open_ids: &'a [String],
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendSyncResult {
+    pub received_count: usize,
+    pub friend_count: usize,
+}
+
 pub struct ServerClient {
     client: Client,
 }
@@ -180,6 +193,51 @@ impl ServerClient {
         Ok(profile)
     }
 
+    pub async fn friend_sync_target(
+        &self,
+        server_url: &str,
+        token: &str,
+        qq_number: &str,
+    ) -> Result<AccountProfile, String> {
+        let qq_number = validated_qq_number(qq_number)?;
+        let connection = self.get_connection_info(server_url, token).await?;
+        let accounts = self.get_accounts_data(server_url, token).await?;
+        let existing = existing_qq_account(&accounts, qq_number, &connection).ok_or_else(|| {
+            "远程服务器中没有当前 QQ 对应的账号；好友同步不会自动创建账号".to_owned()
+        })?;
+        let profile = account_profile_by_id(&accounts, &existing.id)
+            .ok_or_else(|| "远程服务器没有返回对应的 QQ 账号".to_owned())?;
+        if !profile.running {
+            return Err("远程 QQ 账号尚未运行，请先在后台启动账号".to_owned());
+        }
+        Ok(profile)
+    }
+
+    pub async fn sync_friend_open_ids(
+        &self,
+        server_url: &str,
+        token: &str,
+        account_id: &str,
+        open_ids: &[String],
+    ) -> Result<FriendSyncResult, String> {
+        validate_friend_open_ids(open_ids)?;
+        let endpoint = endpoint(server_url, "/api/friends/sync-open-ids")?;
+        let response = self
+            .client
+            .post(endpoint)
+            .header("x-admin-token", token)
+            .header("x-account-id", account_id)
+            .json(&FriendOpenIdsPayload { open_ids })
+            .send()
+            .await
+            .map_err(|error| format!("同步好友 OpenID 失败: {error}"))?;
+        let envelope = parse_response(response).await?;
+        let data = envelope
+            .data
+            .ok_or_else(|| "服务器没有返回好友同步结果".to_owned())?;
+        serde_json::from_value(data).map_err(|_| "服务器返回的好友同步结果无效".to_owned())
+    }
+
     async fn start_account(
         &self,
         server_url: &str,
@@ -235,6 +293,19 @@ fn validated_qq_number(value: &str) -> Result<&str, String> {
     } else {
         Err("拒绝同步：当前 QQ 号未通过本地身份确认，服务器不会创建账号".to_owned())
     }
+}
+
+fn validate_friend_open_ids(open_ids: &[String]) -> Result<(), String> {
+    if open_ids.is_empty() || open_ids.len() > 200 {
+        return Err("好友 OpenID 数量必须在 1 到 200 之间".to_owned());
+    }
+    if open_ids.iter().any(|open_id| {
+        let open_id = open_id.trim();
+        open_id.is_empty() || open_id.len() > 128 || open_id.chars().any(char::is_control)
+    }) {
+        return Err("好友 OpenID 格式无效".to_owned());
+    }
+    Ok(())
 }
 
 impl AccountProfile {
@@ -582,6 +653,93 @@ mod tests {
             )
             .await;
         assert!(result.unwrap_err().contains("服务器不会创建账号"));
+    }
+
+    #[tokio::test]
+    async fn friend_sync_requires_an_existing_running_account_for_the_current_user() {
+        let (server_url, request_receiver) = serve_http_responses(vec![
+            r#"{"ok":true,"data":{"username":"admin","role":"admin"}}"#,
+            r#"{"ok":true,"data":{"accounts":[{"id":"7","name":"主号","username":"admin","platform":"qq","uin":"12345678","running":true}]}}"#,
+        ])
+        .await;
+
+        let profile = ServerClient::new()
+            .unwrap()
+            .friend_sync_target(&server_url, "synthetic-token", "12345678")
+            .await
+            .unwrap();
+
+        assert_eq!(profile.account_id, "7");
+        assert!(profile.running);
+        let requests = request_receiver.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /api/user/me HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /api/accounts HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn friend_sync_does_not_use_an_account_owned_by_another_user() {
+        let (server_url, request_receiver) = serve_http_responses(vec![
+            r#"{"ok":true,"data":{"username":"admin","role":"user"}}"#,
+            r#"{"ok":true,"data":{"accounts":[{"id":"7","name":"其他用户账号","username":"alice","platform":"qq","uin":"12345678","running":true}]}}"#,
+        ])
+        .await;
+
+        let error = ServerClient::new()
+            .unwrap()
+            .friend_sync_target(&server_url, "synthetic-token", "12345678")
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("不会自动创建账号"));
+        let requests = request_receiver.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| !request.starts_with("POST ")));
+    }
+
+    #[tokio::test]
+    async fn friend_sync_posts_only_open_ids_to_the_selected_account() {
+        let (server_url, request_receiver) = serve_http_responses(vec![
+            r#"{"ok":true,"data":{"receivedCount":2,"friendCount":20}}"#,
+        ])
+        .await;
+        let open_ids = vec!["open-a".to_owned(), "open-b".to_owned()];
+
+        let result = ServerClient::new()
+            .unwrap()
+            .sync_friend_open_ids(&server_url, "synthetic-token", "7", &open_ids)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            FriendSyncResult {
+                received_count: 2,
+                friend_count: 20,
+            }
+        );
+        let requests = request_receiver.await.unwrap();
+        let request = &requests[0];
+        assert!(request.starts_with("POST /api/friends/sync-open-ids HTTP/1.1"));
+        assert!(request.to_ascii_lowercase().contains("x-account-id: 7"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("x-admin-token: synthetic-token")
+        );
+        assert!(request.contains(r#"{"openIds":["open-a","open-b"]}"#));
+        assert!(!request.contains("nickname"));
+        assert!(!request.contains("gid"));
+    }
+
+    #[tokio::test]
+    async fn friend_sync_rejects_invalid_open_ids_before_connecting() {
+        let result = ServerClient::new()
+            .unwrap()
+            .sync_friend_open_ids("http://127.0.0.1:9", "token", "7", &[])
+            .await;
+
+        assert!(result.unwrap_err().contains("OpenID"));
     }
 
     async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
