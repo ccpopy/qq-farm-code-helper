@@ -31,6 +31,8 @@ struct ApiEnvelope {
     ok: bool,
     error: Option<String>,
     data: Option<Value>,
+    #[serde(default, rename = "addedCount")]
+    added_count: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,21 +63,15 @@ pub struct SyncAccountInput<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct FriendOpenIdsPayload<'a> {
-    #[serde(rename = "openIds")]
-    open_ids: &'a [String],
+struct FriendGidsPayload<'a> {
+    gids: &'a [String],
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct FriendSyncResult {
-    pub received_count: usize,
-    pub friend_count: usize,
-    #[serde(default)]
-    pub cache_updated: bool,
-    #[serde(default)]
-    pub cached_count: usize,
-    #[serde(default)]
+pub struct FriendGidSyncResult {
+    pub submitted_count: usize,
+    pub added_count: usize,
     pub known_friend_gid_count: usize,
 }
 
@@ -199,29 +195,38 @@ impl ServerClient {
         Ok(profile)
     }
 
-    pub async fn sync_friend_open_ids(
+    pub async fn batch_add_friend_gids(
         &self,
         server_url: &str,
         token: &str,
         account_id: &str,
-        open_ids: &[String],
-    ) -> Result<FriendSyncResult, String> {
-        validate_friend_open_ids(open_ids)?;
-        let endpoint = endpoint(server_url, "/api/friends/sync-open-ids")?;
+        gids: &[String],
+    ) -> Result<FriendGidSyncResult, String> {
+        validate_friend_gids(gids)?;
+        let endpoint = endpoint(server_url, "/api/friend-known-gids/batch-add")?;
         let response = self
             .client
             .post(endpoint)
             .header("x-admin-token", token)
             .header("x-account-id", account_id)
-            .json(&FriendOpenIdsPayload { open_ids })
+            .json(&FriendGidsPayload { gids })
             .send()
             .await
-            .map_err(|error| format!("同步好友 OpenID 失败: {error}"))?;
+            .map_err(|error| format!("批量同步好友 GID 失败: {error}"))?;
         let envelope = parse_response(response).await?;
         let data = envelope
             .data
-            .ok_or_else(|| "服务器没有返回好友同步结果".to_owned())?;
-        serde_json::from_value(data).map_err(|_| "服务器返回的好友同步结果无效".to_owned())
+            .ok_or_else(|| "服务器没有返回好友 GID 设置".to_owned())?;
+        let known_friend_gid_count = data
+            .get("knownFriendGids")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .ok_or_else(|| "服务器返回的好友 GID 设置无效".to_owned())?;
+        Ok(FriendGidSyncResult {
+            submitted_count: gids.len(),
+            added_count: envelope.added_count.unwrap_or_default(),
+            known_friend_gid_count,
+        })
     }
 
     async fn start_account(
@@ -281,15 +286,18 @@ fn validated_qq_number(value: &str) -> Result<&str, String> {
     }
 }
 
-fn validate_friend_open_ids(open_ids: &[String]) -> Result<(), String> {
-    if open_ids.is_empty() || open_ids.len() > 200 {
-        return Err("好友 OpenID 数量必须在 1 到 200 之间".to_owned());
+fn validate_friend_gids(gids: &[String]) -> Result<(), String> {
+    if gids.is_empty() || gids.len() > 500 {
+        return Err("好友 GID 数量必须在 1 到 500 之间".to_owned());
     }
-    if open_ids.iter().any(|open_id| {
-        let open_id = open_id.trim();
-        open_id.is_empty() || open_id.len() > 128 || open_id.chars().any(char::is_control)
+    if gids.iter().any(|gid| {
+        let gid = gid.trim();
+        gid.is_empty()
+            || gid.len() > 19
+            || !gid.bytes().all(|byte| byte.is_ascii_digit())
+            || gid.bytes().all(|byte| byte == b'0')
     }) {
-        return Err("好友 OpenID 格式无效".to_owned());
+        return Err("好友 GID 格式无效".to_owned());
     }
     Ok(())
 }
@@ -642,51 +650,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn friend_sync_posts_only_open_ids_to_the_selected_account() {
+    async fn friend_sync_posts_only_gids_to_the_selected_account() {
         let (server_url, request_receiver) = serve_http_responses(vec![
-            r#"{"ok":true,"data":{"receivedCount":2,"friendCount":20,"cacheUpdated":true,"cachedCount":20,"knownFriendGidCount":20}}"#,
+            r#"{"ok":true,"data":{"knownFriendGids":[10001,10002,10003]},"addedCount":2}"#,
         ])
         .await;
-        let open_ids = vec!["open-a".to_owned(), "open-b".to_owned()];
+        let gids = vec!["10001".to_owned(), "10002".to_owned()];
 
         let result = ServerClient::new()
             .unwrap()
-            .sync_friend_open_ids(&server_url, "synthetic-token", "7", &open_ids)
+            .batch_add_friend_gids(&server_url, "synthetic-token", "7", &gids)
             .await
             .unwrap();
 
         assert_eq!(
             result,
-            FriendSyncResult {
-                received_count: 2,
-                friend_count: 20,
-                cache_updated: true,
-                cached_count: 20,
-                known_friend_gid_count: 20,
+            FriendGidSyncResult {
+                submitted_count: 2,
+                added_count: 2,
+                known_friend_gid_count: 3,
             }
         );
         let requests = request_receiver.await.unwrap();
         let request = &requests[0];
-        assert!(request.starts_with("POST /api/friends/sync-open-ids HTTP/1.1"));
+        assert!(request.starts_with("POST /api/friend-known-gids/batch-add HTTP/1.1"));
         assert!(request.to_ascii_lowercase().contains("x-account-id: 7"));
         assert!(
             request
                 .to_ascii_lowercase()
                 .contains("x-admin-token: synthetic-token")
         );
-        assert!(request.contains(r#"{"openIds":["open-a","open-b"]}"#));
+        assert!(request.contains(r#"{"gids":["10001","10002"]}"#));
         assert!(!request.contains("nickname"));
-        assert!(!request.contains("gid"));
+        assert!(!request.contains("openId"));
     }
 
     #[tokio::test]
-    async fn friend_sync_rejects_invalid_open_ids_before_connecting() {
+    async fn friend_sync_rejects_invalid_gids_before_connecting() {
         let result = ServerClient::new()
             .unwrap()
-            .sync_friend_open_ids("http://127.0.0.1:9", "token", "7", &[])
+            .batch_add_friend_gids(
+                "http://127.0.0.1:9",
+                "token",
+                "7",
+                &["not-a-gid".to_owned()],
+            )
             .await;
 
-        assert!(result.unwrap_err().contains("OpenID"));
+        assert!(result.unwrap_err().contains("GID"));
     }
 
     async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {

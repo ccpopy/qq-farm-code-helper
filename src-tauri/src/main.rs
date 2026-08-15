@@ -4,7 +4,7 @@ mod app_state;
 mod certificates;
 mod commands;
 mod friend_capture;
-mod local_friend_capture;
+mod friend_proxy;
 mod proxy;
 mod qq_identity;
 mod qq_window;

@@ -1,5 +1,8 @@
-use crate::{certificates::TARGET_HOST, local_friend_capture};
-use rustls::ServerConfig;
+use crate::{
+    certificates::{TARGET_HOST, upstream_client_config},
+    friend_proxy,
+};
+use rustls::{ClientConfig, ServerConfig};
 use std::{
     fs::OpenOptions,
     io::Write,
@@ -26,7 +29,7 @@ const TARGET_PATH: &str = "/prod/ws";
 pub enum ProxyMode {
     CaptureCode {
         captured: mpsc::Sender<CapturedLogin>,
-        capture_friend_open_ids: bool,
+        capture_friend_gids: bool,
         diagnostics_path: Option<PathBuf>,
     },
 }
@@ -34,7 +37,7 @@ pub enum ProxyMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedLogin {
     pub code: String,
-    pub friend_open_ids: Vec<String>,
+    pub friend_gids: Vec<String>,
     pub friend_capture_warning: Option<String>,
 }
 
@@ -50,6 +53,13 @@ pub async fn run(
     cancellation: CancellationToken,
     mode: ProxyMode,
 ) {
+    let upstream_tls = match &mode {
+        ProxyMode::CaptureCode {
+            capture_friend_gids: true,
+            ..
+        } => Some(upstream_client_config()),
+        _ => None,
+    };
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
@@ -60,11 +70,12 @@ pub async fn run(
                 };
                 let tls_config = tls_config.clone();
                 let mode = mode.clone();
+                let upstream_tls = upstream_tls.clone();
                 let connection_cancellation = cancellation.clone();
                 connections.spawn(async move {
                     tokio::select! {
                         _ = connection_cancellation.cancelled() => Ok(()),
-                        result = handle_client(stream, peer, tls_config, mode) => result,
+                        result = handle_client(stream, peer, tls_config, mode, upstream_tls) => result,
                     }
                 });
             }
@@ -92,13 +103,14 @@ async fn handle_client(
     _peer: SocketAddr,
     tls_config: Arc<ServerConfig>,
     mode: ProxyMode,
+    upstream_tls: Option<Arc<ClientConfig>>,
 ) -> Result<(), String> {
     let headers = read_headers(&mut client).await?;
     let request = ParsedRequest::parse(&headers)?;
     if request.method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = parse_authority(&request.target)?;
         if host.eq_ignore_ascii_case(TARGET_HOST) && port == 443 {
-            return intercept_target(client, tls_config, mode).await;
+            return intercept_target(client, tls_config, mode, upstream_tls).await;
         }
         return tunnel_connect(client, &host, port).await;
     }
@@ -109,6 +121,7 @@ async fn intercept_target(
     mut client: TcpStream,
     tls_config: Arc<ServerConfig>,
     mode: ProxyMode,
+    upstream_tls: Option<Arc<ClientConfig>>,
 ) -> Result<(), String> {
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -125,32 +138,33 @@ async fn intercept_target(
     match mode {
         ProxyMode::CaptureCode {
             captured,
-            capture_friend_open_ids,
+            capture_friend_gids,
             diagnostics_path,
         } => {
             let request = ParsedRequest::parse(&headers)?;
             log_target_request_diagnostics(&headers, &request, diagnostics_path.as_deref());
             let code = extract_farm_code(&request.target, &request.host)?;
-            if !capture_friend_open_ids {
+            if !capture_friend_gids {
                 let _ = captured.try_send(CapturedLogin {
                     code,
-                    friend_open_ids: Vec::new(),
+                    friend_gids: Vec::new(),
                     friend_capture_warning: None,
                 });
                 return write_blocked_response(&mut tls).await;
             }
 
-            let (friend_open_ids, friend_capture_warning) =
-                match local_friend_capture::capture_sync_all_request(&mut tls, &headers).await {
-                    Ok(open_ids) => (open_ids, None),
+            let upstream_tls =
+                upstream_tls.ok_or_else(|| "官方透明登录缺少上游 TLS 配置".to_owned())?;
+            let (friend_gids, friend_capture_warning) =
+                match friend_proxy::relay_target_websocket(tls, headers, upstream_tls).await {
+                    Ok(outcome) => (outcome.gids, outcome.warning),
                     Err(error) => (Vec::new(), Some(error)),
                 };
             let _ = captured.try_send(CapturedLogin {
                 code,
-                friend_open_ids,
+                friend_gids,
                 friend_capture_warning,
             });
-            let _ = tls.shutdown().await;
             Ok(())
         }
     }
@@ -473,7 +487,7 @@ mod tests {
             cancellation.clone(),
             ProxyMode::CaptureCode {
                 captured: sender,
-                capture_friend_open_ids: false,
+                capture_friend_gids: false,
                 diagnostics_path: None,
             },
         ));
