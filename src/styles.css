@@ -283,6 +283,7 @@ button:focus-visible, .switch-field input:focus-visible + i { outline: 2px solid
 
 .settings-card { margin-top: 14px; padding: 17px 19px 14px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 13px; }
+.settings-switches { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; }
 .switch-field { display: inline-flex; align-items: center; gap: 8px; color: #73786d; font-size: 10px; }
 .switch-field input { position: absolute; opacity: 0; pointer-events: none; }
 .switch-field i { position: relative; width: 35px; height: 20px; border: 1px solid #d4d2c8; border-radius: 999px; background: #eeeae1; transition: 160ms ease; }

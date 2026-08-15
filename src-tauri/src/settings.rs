@@ -13,6 +13,7 @@ pub struct AppSettings {
     pub account_name: String,
     pub qq_number: String,
     pub auto_sync: bool,
+    pub sync_official_friends: bool,
     pub proxy_port: u16,
     pub update_proxy: bool,
 }
@@ -24,6 +25,7 @@ impl Default for AppSettings {
             account_name: "Windows QQ".to_owned(),
             qq_number: String::new(),
             auto_sync: true,
+            sync_official_friends: true,
             proxy_port: 8899,
             update_proxy: true,
         }
@@ -190,6 +192,7 @@ mod tests {
         .unwrap();
 
         assert!(settings.update_proxy);
+        assert!(settings.sync_official_friends);
     }
 
     #[test]

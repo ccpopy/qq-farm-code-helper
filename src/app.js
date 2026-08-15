@@ -8,8 +8,6 @@ const elements = {
   checkUpdateButton: document.querySelector('#checkUpdateButton'),
   copyButton: document.querySelector('#copyButton'),
   detectQqButton: document.querySelector('#detectQqButton'),
-  friendStageList: [...document.querySelectorAll('#friendStageList li')],
-  friendStageListContainer: document.querySelector('#friendStageList'),
   inlineMessage: document.querySelector('#inlineMessage'),
   installUpdateButton: document.querySelector('#installUpdateButton'),
   proxyPort: document.querySelector('#proxyPort'),
@@ -26,7 +24,6 @@ const elements = {
   serverToken: document.querySelector('#serverToken'),
   serverUrl: document.querySelector('#serverUrl'),
   stageList: [...document.querySelectorAll('#stageList li')],
-  stageListContainer: document.querySelector('#stageList'),
   startButton: document.querySelector('#startButton'),
   startButtonText: document.querySelector('#startButtonText'),
   statusCode: document.querySelector('#statusCode'),
@@ -34,7 +31,7 @@ const elements = {
   statusSignal: document.querySelector('#statusSignal'),
   statusTitle: document.querySelector('#statusTitle'),
   stopButton: document.querySelector('#stopButton'),
-  syncFriendsButton: document.querySelector('#syncFriendsButton'),
+  syncOfficialFriends: document.querySelector('#syncOfficialFriends'),
   testButton: document.querySelector('#testButton'),
   toggleToken: document.querySelector('#toggleToken'),
   tokenHint: document.querySelector('#tokenHint'),
@@ -49,16 +46,11 @@ const elements = {
 }
 
 const stageOrder = ['preparing_proxy', 'waiting_login', 'code_captured', 'syncing']
-const friendStageOrder = ['preparing_friend_sync', 'waiting_friend_sync', 'syncing_friends', 'friends_synced']
-const friendViewPhases = new Set([...friendStageOrder, 'friend_identity_changed'])
 const activePhases = new Set([
   'preparing_proxy',
   'waiting_login',
   'code_captured',
   'syncing',
-  'preparing_friend_sync',
-  'waiting_friend_sync',
-  'syncing_friends',
 ])
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
 const identityPollInterval = 2000
@@ -162,6 +154,7 @@ function settingsPayload() {
       account_name: elements.accountName.value.trim(),
       qq_number: elements.qqNumber.value.trim(),
       auto_sync: elements.autoSync.checked,
+      sync_official_friends: elements.syncOfficialFriends.checked,
       proxy_port: Number(elements.proxyPort.value),
       update_proxy: elements.updateProxy.checked,
     },
@@ -283,6 +276,7 @@ function fillSettings(data) {
   elements.accountName.value = data.settings.account_name || 'Windows QQ'
   elements.qqNumber.value = data.settings.qq_number || ''
   elements.autoSync.checked = data.settings.auto_sync !== false
+  elements.syncOfficialFriends.checked = data.settings.sync_official_friends !== false
   elements.proxyPort.value = data.settings.proxy_port || 8899
   elements.updateProxy.checked = data.settings.update_proxy !== false
   syncUpdateProxyHint()
@@ -297,6 +291,7 @@ function syncTaskUi() {
   for (const element of [
     elements.accountName,
     elements.autoSync,
+    elements.syncOfficialFriends,
     elements.detectQqButton,
     elements.saveButton,
     elements.serverToken,
@@ -306,15 +301,12 @@ function syncTaskUi() {
     elements.proxyPort,
   ])
     element.disabled = isActive
+  elements.syncOfficialFriends.disabled = isActive || !elements.autoSync.checked
   elements.startButton.disabled = isActive
-  elements.syncFriendsButton.disabled = isActive
   elements.cleanupButton.disabled = startPending
     || currentPhase === 'preparing_proxy'
-    || currentPhase === 'preparing_friend_sync'
-  const friendActive = ['preparing_friend_sync', 'waiting_friend_sync', 'syncing_friends'].includes(currentPhase)
   const codeActive = ['preparing_proxy', 'waiting_login', 'code_captured', 'syncing'].includes(currentPhase)
   elements.startButtonText.textContent = codeActive ? '正在获取…' : '启动获取'
-  elements.syncFriendsButton.textContent = friendActive ? '正在同步好友…' : '同步官方好友'
 }
 
 function syncUpdateProxyHint() {
@@ -509,27 +501,18 @@ function renderAccountCard() {
   }
   const remoteMatchesLocal = currentRemoteProfile?.qqNumber
     && currentRemoteProfile.qqNumber === currentLocalIdentity.qqNumber
-  if ((currentPhase === 'completed' || friendViewPhases.has(currentPhase)) && remoteMatchesLocal)
+  if (currentPhase === 'completed' && remoteMatchesLocal)
     renderProfile(currentRemoteProfile)
   else
     renderLocalIdentity(currentLocalIdentity)
 }
 
 function updateStages(phase) {
-  const showFriendStages = friendViewPhases.has(phase)
-  elements.stageListContainer.classList.toggle('hidden', showFriendStages)
-  elements.friendStageListContainer.classList.toggle('hidden', !showFriendStages)
   const activeIndex = stageOrder.indexOf(phase)
   elements.stageList.forEach((item) => {
     const index = stageOrder.indexOf(item.dataset.stage)
     item.classList.toggle('active', index === activeIndex)
     item.classList.toggle('done', activeIndex > index || phase === 'completed')
-  })
-  const friendActiveIndex = friendStageOrder.indexOf(phase)
-  elements.friendStageList.forEach((item) => {
-    const index = friendStageOrder.indexOf(item.dataset.stage)
-    item.classList.toggle('active', index === friendActiveIndex)
-    item.classList.toggle('done', friendActiveIndex > index || phase === 'friends_synced')
   })
 }
 
@@ -546,10 +529,6 @@ function showStatusToast(status) {
     return
   }
   const config = {
-    waiting_friend_sync: { type: 'warning', duration: 10000 },
-    syncing_friends: { type: 'info', duration: 5200 },
-    friends_synced: { type: 'success', duration: 6500 },
-    friend_identity_changed: { type: 'warning', duration: 9000 },
     code_captured: { type: 'success', duration: 6500 },
     syncing: { type: 'info', duration: 5200 },
     completed: { type: 'success', duration: 6000 },
@@ -573,14 +552,14 @@ function renderStatus(status, { notify = false } = {}) {
   currentPhase = phase
   currentRemoteProfile = status.profile || null
   const isActive = activePhases.has(phase)
-  const isError = phase === 'error' || phase === 'identity_changed' || phase === 'friend_identity_changed'
-  const isSuccess = phase === 'completed' || phase === 'friends_synced'
+  const isError = phase === 'error' || phase === 'identity_changed'
+  const isSuccess = phase === 'completed'
   elements.statusTitle.textContent = status.title
   elements.statusDetail.textContent = status.detail
   elements.statusCode.textContent = phase.replaceAll('_', ' ').toUpperCase()
   elements.statusSignal.className = `status-signal ${isActive ? 'active' : ''} ${isSuccess ? 'success' : ''} ${isError ? 'error' : ''}`
   elements.startButton.disabled = isActive
-  elements.stopButton.disabled = !isActive || phase === 'preparing_proxy' || phase === 'preparing_friend_sync'
+  elements.stopButton.disabled = !isActive || phase === 'preparing_proxy'
   elements.copyButton.classList.toggle('hidden', !status.code_available)
   updateStages(phase)
   renderAccountCard()
@@ -639,30 +618,6 @@ async function startCapture() {
   }
   catch (error) {
     showMessage(String(error), { type: 'error', title: '无法启动获取', duration: 10000 })
-  }
-  finally {
-    startPending = false
-    syncTaskUi()
-  }
-}
-
-async function startFriendSync() {
-  const confirmed = window.confirm(
-    '同步官方好友会让本次 QQ 农场登录正常完成并消耗一次性 Code。捕获到 SyncAll 后，仅将好友 OpenID 发送到你配置的远程账号，Helper 不会写入本地文件。确认继续吗？',
-  )
-  if (!confirmed)
-    return
-  showMessage('')
-  startPending = true
-  syncTaskUi()
-  try {
-    await invoke('save_settings', settingsPayload())
-    elements.serverToken.value = ''
-    await invoke('start_friend_sync')
-    dismissToast('identity-unavailable')
-  }
-  catch (error) {
-    showMessage(String(error), { type: 'error', title: '无法同步官方好友', duration: 10000 })
   }
   finally {
     startPending = false
@@ -799,7 +754,6 @@ async function bootstrap() {
 elements.saveButton.addEventListener('click', saveSettings)
 elements.testButton.addEventListener('click', testConnection)
 elements.startButton.addEventListener('click', startCapture)
-elements.syncFriendsButton.addEventListener('click', startFriendSync)
 elements.stopButton.addEventListener('click', stopCapture)
 elements.cleanupButton.addEventListener('click', cleanupNetwork)
 elements.checkUpdateButton.addEventListener('click', () => checkForUpdate())
@@ -807,6 +761,7 @@ elements.copyButton.addEventListener('click', copyCode)
 elements.detectQqButton.addEventListener('click', () => detectLocalQq())
 elements.installUpdateButton.addEventListener('click', installUpdate)
 elements.updateProxy.addEventListener('change', saveUpdateProxyPreference)
+elements.autoSync.addEventListener('change', syncTaskUi)
 elements.toggleToken.addEventListener('click', () => {
   const hidden = elements.serverToken.type === 'password'
   elements.serverToken.type = hidden ? 'text' : 'password'

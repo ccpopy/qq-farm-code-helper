@@ -61,14 +61,6 @@ pub async fn start_capture(core: State<'_, Arc<AppCore>>, app: AppHandle) -> Res
 }
 
 #[tauri::command]
-pub async fn start_friend_sync(
-    core: State<'_, Arc<AppCore>>,
-    app: AppHandle,
-) -> Result<(), String> {
-    core.inner().clone().start_friend_sync(app).await
-}
-
-#[tauri::command]
 pub async fn stop_capture(core: State<'_, Arc<AppCore>>, app: AppHandle) -> Result<(), String> {
     core.stop_capture(&app).await
 }

@@ -4,7 +4,7 @@ mod app_state;
 mod certificates;
 mod commands;
 mod friend_capture;
-mod friend_proxy;
+mod local_friend_capture;
 mod proxy;
 mod qq_identity;
 mod qq_window;
@@ -92,7 +92,6 @@ fn main() {
             commands::save_settings,
             commands::test_connection,
             commands::start_capture,
-            commands::start_friend_sync,
             commands::stop_capture,
             commands::cleanup_network,
             commands::get_captured_code,

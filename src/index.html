@@ -54,30 +54,11 @@
               </li>
               <li data-stage="code_captured">
                 <span class="stage-index">03</span>
-                <span><strong>获取 Code</strong><small>阻止消耗</small></span>
+                <span><strong>获取登录数据</strong><small>Code 与好友</small></span>
               </li>
               <li data-stage="syncing">
                 <span class="stage-index">04</span>
-                <span><strong>同步服务器</strong><small>自动启动</small></span>
-              </li>
-            </ol>
-
-            <ol class="stage-list hidden" id="friendStageList">
-              <li data-stage="preparing_friend_sync">
-                <span class="stage-index">01</span>
-                <span><strong>确认账号</strong><small>仅匹配已有账号</small></span>
-              </li>
-              <li data-stage="waiting_friend_sync">
-                <span class="stage-index">02</span>
-                <span><strong>官方登录</strong><small>正常进入农场</small></span>
-              </li>
-              <li data-stage="syncing_friends">
-                <span class="stage-index">03</span>
-                <span><strong>获取好友</strong><small>读取 SyncAll</small></span>
-              </li>
-              <li data-stage="friends_synced">
-                <span class="stage-index">04</span>
-                <span><strong>刷新远程</strong><small>不在本地落盘</small></span>
+                <span><strong>同步服务器</strong><small>启动并刷新好友</small></span>
               </li>
             </ol>
 
@@ -86,7 +67,6 @@
                 <span class="button-dot"></span>
                 <span id="startButtonText">启动获取</span>
               </button>
-              <button class="secondary-action" id="syncFriendsButton" type="button" disabled>同步官方好友</button>
               <button class="secondary-action" id="stopButton" type="button" disabled>停止并恢复网络</button>
               <button class="secondary-action hidden" id="copyButton" type="button">复制 Code</button>
             </div>
@@ -124,11 +104,18 @@
               <p class="section-label">SERVER SYNC</p>
               <h2>服务器设置</h2>
             </div>
-            <label class="switch-field">
-              <span>获取后自动同步</span>
-              <input id="autoSync" type="checkbox" checked>
-              <i aria-hidden="true"></i>
-            </label>
+            <div class="settings-switches">
+              <label class="switch-field">
+                <span>获取后自动同步</span>
+                <input id="autoSync" type="checkbox" checked>
+                <i aria-hidden="true"></i>
+              </label>
+              <label class="switch-field" title="默认开启；与 Code 使用同一次 QQ 农场登录完成好友刷新">
+                <span>同步官方好友</span>
+                <input id="syncOfficialFriends" type="checkbox" checked>
+                <i aria-hidden="true"></i>
+              </label>
+            </div>
           </div>
 
           <div class="form-grid">
