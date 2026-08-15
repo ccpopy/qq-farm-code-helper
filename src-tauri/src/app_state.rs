@@ -2,7 +2,7 @@ use crate::{
     certificates::CertificateManager,
     proxy::{self, ProxyMode},
     qq_identity::{self, LocalQqIdentity},
-    server_sync::{FriendGidSyncResult, ServerClient, SyncAccountInput},
+    server_sync::{FriendGidCleanupResult, FriendGidSyncResult, ServerClient, SyncAccountInput},
     settings::{AppSettings, SettingsStore, SettingsView},
     status::StatusPayload,
     system_proxy::SystemProxyManager,
@@ -31,6 +31,7 @@ struct RuntimeState {
     capture_task: Option<JoinHandle<()>>,
     identity_task: Option<JoinHandle<()>>,
     last_code: Option<String>,
+    selected_qq_number: Option<String>,
     locked_identity: Option<LocalQqIdentity>,
     identity_warning: Option<String>,
     status: StatusPayload,
@@ -45,6 +46,7 @@ impl Default for RuntimeState {
             capture_task: None,
             identity_task: None,
             last_code: None,
+            selected_qq_number: None,
             locked_identity: None,
             identity_warning: None,
             status: StatusPayload::idle(),
@@ -55,8 +57,10 @@ impl Default for RuntimeState {
 pub struct AppCore {
     certificates: CertificateManager,
     diagnostics_path: PathBuf,
+    network_recovery: Mutex<()>,
     proxy_manager: SystemProxyManager,
     settings: SettingsStore,
+    transport_stop: Mutex<()>,
     runtime: Mutex<RuntimeState>,
     startup_warning: Mutex<Option<String>>,
     pub exiting: AtomicBool,
@@ -67,8 +71,10 @@ impl AppCore {
         Self {
             certificates: CertificateManager::new(data_dir.clone()),
             diagnostics_path: data_dir.join("traffic-diagnostics.log"),
+            network_recovery: Mutex::new(()),
             proxy_manager: SystemProxyManager::new(data_dir.clone()),
             settings: SettingsStore::new(data_dir),
+            transport_stop: Mutex::new(()),
             runtime: Mutex::new(RuntimeState::default()),
             startup_warning: Mutex::new(None),
             exiting: AtomicBool::new(false),
@@ -155,6 +161,7 @@ impl AppCore {
             cancellation,
             task,
             None,
+            (!settings.qq_number.is_empty()).then(|| settings.qq_number.clone()),
             Some(INITIAL_IDENTITY_WARNING.to_owned()),
         )
         .await;
@@ -196,9 +203,8 @@ impl AppCore {
     }
 
     pub async fn cleanup_network(&self, app: &AppHandle) -> Result<(), String> {
-        let _ = self.stop_transport().await;
+        self.stop_transport().await?;
         self.clear_capture_identity().await;
-        self.recover_network().await?;
         self.publish(
             app,
             StatusPayload::new(
@@ -221,9 +227,33 @@ impl AppCore {
             .ok_or_else(|| "当前没有可复制的 Code".to_owned())
     }
 
+    pub async fn select_local_qq(
+        &self,
+        app: &AppHandle,
+        identity: LocalQqIdentity,
+    ) -> Result<LocalQqIdentity, String> {
+        let mut runtime = self.runtime.lock().await;
+        if runtime.cancellation.is_some() && runtime.status.phase != "waiting_login" {
+            return Err("当前阶段不能切换 QQ 账号，请结束本次任务后重试".to_owned());
+        }
+        runtime.selected_qq_number = Some(identity.qq_number.clone());
+        let (changed, previous) = replace_locked_identity(&mut runtime.locked_identity, &identity);
+        runtime.identity_warning = None;
+        if runtime.status.phase == "waiting_login" && changed {
+            let status = StatusPayload::new(
+                "waiting_login",
+                "QQ 已确认，等待农场登录",
+                waiting_identity_detail(previous.as_deref(), &identity),
+                false,
+            );
+            runtime.status = status.clone();
+            let _ = app.emit("capture-status", status);
+        }
+        Ok(identity)
+    }
+
     pub async fn shutdown(&self) {
         let _ = self.stop_transport().await;
-        let _ = self.recover_network().await;
     }
 
     async fn spawn_capture_handler(
@@ -253,6 +283,21 @@ impl AppCore {
             .ok_or_else(|| "后台登录 Token 已不存在".to_owned())?;
         ServerClient::new()?
             .batch_add_friend_gids(&settings.server_url, &token, account_id, gids)
+            .await
+    }
+
+    async fn remove_friend_gids(
+        &self,
+        account_id: &str,
+        gids: &[String],
+    ) -> Result<FriendGidCleanupResult, String> {
+        let settings = self.settings.load()?;
+        let token = self
+            .settings
+            .token()?
+            .ok_or_else(|| "后台登录 Token 已不存在".to_owned())?;
+        ServerClient::new()?
+            .batch_remove_friend_gids(&settings.server_url, &token, account_id, gids)
             .await
     }
 
@@ -345,44 +390,11 @@ impl AppCore {
                 self.set_code(None).await;
                 let mut detail = sync_completion_detail(&profile, &locked_identity);
                 if settings.sync_official_friends {
-                    if captured.friend_gids.is_empty() {
-                        let warning = captured
-                            .friend_capture_warning
-                            .as_deref()
-                            .unwrap_or("官方登录期间没有返回可识别的好友 GID");
-                        detail.push_str(&format!(" 好友同步已跳过：{warning}。"));
-                    } else {
-                        self.publish(
-                            app,
-                            StatusPayload::new(
-                                "syncing",
-                                "Code 已同步，正在导入好友",
-                                "通过服务器 Token 批量写入官方响应中的好友 GID…",
-                                false,
-                            )
-                            .with_profile(profile.clone()),
-                        )
-                        .await;
-                        match self
-                            .send_friend_gids(&profile.account_id, &captured.friend_gids)
-                            .await
-                        {
-                            Ok(friend_result) => {
-                                detail.push_str(&format!(
-                                    " 已向远程提交 {} 个官方好友 GID，本次新增 {} 个，远程当前共保存 {} 个已知好友 GID。",
-                                    friend_result.submitted_count,
-                                    friend_result.added_count,
-                                    friend_result.known_friend_gid_count
-                                ));
-                                if let Some(warning) = captured.friend_capture_warning.as_deref() {
-                                    detail.push_str(&format!(" 捕获说明：{warning}。"));
-                                }
-                            }
-                            Err(error) => detail.push_str(&format!(
-                                " Code 已同步成功，但批量写入远程好友 GID 失败：{error}。"
-                            )),
-                        }
-                    }
+                    detail.push_str(
+                        &self
+                            .sync_official_friend_gids(app, &profile, captured)
+                            .await,
+                    );
                 }
                 self.publish(
                     app,
@@ -396,6 +408,98 @@ impl AppCore {
                     .await;
             }
         }
+    }
+
+    async fn sync_official_friend_gids(
+        &self,
+        app: &AppHandle,
+        profile: &crate::server_sync::AccountProfile,
+        captured: &proxy::CapturedLogin,
+    ) -> String {
+        if captured.friend_gids.is_empty() {
+            let warning = captured
+                .friend_capture_warning
+                .as_deref()
+                .unwrap_or("官方登录期间没有返回可识别的好友 GID");
+            return format!(" 好友同步已跳过：{warning}。");
+        }
+
+        let own_gid = profile.gid.trim();
+        if own_gid.is_empty() {
+            return " 好友同步已跳过：远程尚未回填当前账号 GID，无法安全排除自身账号。".to_owned();
+        }
+
+        let friend_gids = friend_gids_without_self(&captured.friend_gids, own_gid);
+        let excluded_count = captured.friend_gids.len() - friend_gids.len();
+        let progress_detail = if excluded_count > 0 {
+            format!(
+                "官方返回 {} 个 GID，已在本地排除当前账号，正在清理远程历史记录并提交其余 {} 个好友…",
+                captured.friend_gids.len(),
+                friend_gids.len()
+            )
+        } else {
+            format!(
+                "官方返回 {} 个好友 GID，正在清理远程历史中的自身 GID 并批量写入…",
+                friend_gids.len()
+            )
+        };
+        self.publish(
+            app,
+            StatusPayload::new(
+                "syncing",
+                "Code 已同步，正在导入好友",
+                progress_detail,
+                false,
+            )
+            .with_profile(profile.clone()),
+        )
+        .await;
+
+        let own_gids = [own_gid.to_owned()];
+        let cleanup_result = self
+            .remove_friend_gids(&profile.account_id, &own_gids)
+            .await;
+        let add_result = if friend_gids.is_empty() {
+            None
+        } else {
+            Some(
+                self.send_friend_gids(&profile.account_id, &friend_gids)
+                    .await,
+            )
+        };
+
+        let mut detail = format!(
+            " 官方响应共 {} 个 GID，已在本地排除 {} 个当前账号 GID，识别为 {} 个好友。",
+            captured.friend_gids.len(),
+            excluded_count,
+            friend_gids.len()
+        );
+        match cleanup_result {
+            Ok(result) if result.removed_count > 0 => detail.push_str(&format!(
+                " 已从远程历史缓存清理 {} 个自身 GID。",
+                result.removed_count
+            )),
+            Ok(result) if friend_gids.is_empty() => detail.push_str(&format!(
+                " 远程历史无需清理，当前共保存 {} 个已知好友 GID。",
+                result.known_friend_gid_count
+            )),
+            Ok(_) => {}
+            Err(error) => detail.push_str(&format!(" 清理远程历史自身 GID 失败：{error}。")),
+        }
+        match add_result {
+            Some(Ok(result)) => detail.push_str(&format!(
+                " 已向远程提交 {} 个官方好友 GID，本次新增 {} 个，远程当前共保存 {} 个已知好友 GID。",
+                result.submitted_count, result.added_count, result.known_friend_gid_count
+            )),
+            Some(Err(error)) => detail.push_str(&format!(
+                " Code 已同步成功，但批量写入远程好友 GID 失败：{error}。"
+            )),
+            None => detail.push_str(" 排除自身账号后没有可提交的好友 GID。"),
+        }
+        if let Some(warning) = captured.friend_capture_warning.as_deref() {
+            detail.push_str(&format!(" 捕获说明：{warning}。"));
+        }
+        detail
     }
 
     async fn publish_identity_blocked(&self, app: &AppHandle, reason: &str) {
@@ -471,6 +575,7 @@ impl AppCore {
         cancellation: CancellationToken,
         task: JoinHandle<()>,
         locked_identity: Option<LocalQqIdentity>,
+        selected_qq_number: Option<String>,
         identity_warning: Option<String>,
     ) {
         let mut runtime = self.runtime.lock().await;
@@ -478,11 +583,13 @@ impl AppCore {
         runtime.task = Some(task);
         runtime.identity_task = None;
         runtime.last_code = None;
+        runtime.selected_qq_number = selected_qq_number;
         runtime.locked_identity = locked_identity;
         runtime.identity_warning = identity_warning;
     }
 
     async fn stop_transport(&self) -> Result<(), String> {
+        let _stopping = self.transport_stop.lock().await;
         let (cancellation, task, capture_task, identity_task) = {
             let mut runtime = self.runtime.lock().await;
             (
@@ -510,6 +617,7 @@ impl AppCore {
     }
 
     async fn stop_proxy_transport(&self) -> Result<(), String> {
+        let _stopping = self.transport_stop.lock().await;
         let (cancellation, task, identity_task) = {
             let mut runtime = self.runtime.lock().await;
             (
@@ -542,8 +650,8 @@ impl AppCore {
                 if cancellation.is_cancelled() {
                     break;
                 }
-                match qq_identity::detect_stable_async().await {
-                    Ok(identity) => core.adopt_waiting_identity(&app, identity).await,
+                match qq_identity::detect_stable_all_async().await {
+                    Ok(identities) => core.adopt_waiting_identities(&app, identities).await,
                     Err(error) => {
                         core.mark_waiting_identity_unconfirmed(&app, error).await;
                     }
@@ -557,12 +665,21 @@ impl AppCore {
         self.runtime.lock().await.identity_task = Some(task);
     }
 
+    async fn adopt_waiting_identities(&self, app: &AppHandle, identities: Vec<LocalQqIdentity>) {
+        let selected_qq_number = self.runtime.lock().await.selected_qq_number.clone();
+        match choose_waiting_identity(&identities, selected_qq_number.as_deref()) {
+            Ok(identity) => self.adopt_waiting_identity(app, identity).await,
+            Err(error) => self.mark_waiting_identity_unconfirmed(app, error).await,
+        }
+    }
+
     async fn adopt_waiting_identity(&self, app: &AppHandle, identity: LocalQqIdentity) {
         let mut runtime = self.runtime.lock().await;
         if runtime.status.phase != "waiting_login" {
             return;
         }
         let (changed, previous) = replace_locked_identity(&mut runtime.locked_identity, &identity);
+        runtime.selected_qq_number = Some(identity.qq_number.clone());
         runtime.identity_warning = None;
         if !changed {
             return;
@@ -612,6 +729,7 @@ impl AppCore {
     }
 
     async fn recover_network(&self) -> Result<(), String> {
+        let _recovery = self.network_recovery.lock().await;
         let proxy_manager = &self.proxy_manager;
         let certificates = &self.certificates;
         tokio::task::block_in_place(|| {
@@ -648,7 +766,7 @@ impl AppCore {
         let Some(locked_identity) = locked_identity else {
             return;
         };
-        let result = detect_current_qq_with_retry(2).await;
+        let result = detect_selected_qq_with_retry(&locked_identity.qq_number, 2).await;
         let mut runtime = self.runtime.lock().await;
         match result {
             Ok(current) if current.qq_number == locked_identity.qq_number => {
@@ -731,10 +849,13 @@ fn waiting_identity_detail(previous: Option<&str>, identity: &LocalQqIdentity) -
     }
 }
 
-async fn detect_current_qq_with_retry(max_attempts: usize) -> Result<LocalQqIdentity, String> {
+async fn detect_selected_qq_with_retry(
+    qq_number: &str,
+    max_attempts: usize,
+) -> Result<LocalQqIdentity, String> {
     let mut last_error = "未能确认当前 QQ".to_owned();
     for attempt in 0..max_attempts {
-        match qq_identity::detect_stable_async().await {
+        match qq_identity::detect_selected_stable_async(qq_number).await {
             Ok(identity) => return Ok(identity),
             Err(error) => last_error = error,
         }
@@ -743,6 +864,43 @@ async fn detect_current_qq_with_retry(max_attempts: usize) -> Result<LocalQqIden
         }
     }
     Err(last_error)
+}
+
+fn choose_waiting_identity(
+    identities: &[LocalQqIdentity],
+    selected_qq_number: Option<&str>,
+) -> Result<LocalQqIdentity, String> {
+    if identities.is_empty() {
+        return Err("未检测到可确认的 Windows QQ 账号".to_owned());
+    }
+    if let Some(selected_qq_number) = selected_qq_number {
+        return identities
+            .iter()
+            .find(|identity| identity.qq_number == selected_qq_number)
+            .cloned()
+            .ok_or_else(|| {
+                format!("所选 QQ {selected_qq_number} 已不在当前登录窗口中，请重新选择")
+            });
+    }
+    if identities.len() == 1 {
+        return Ok(identities[0].clone());
+    }
+    Err(format!(
+        "检测到 {} 个 Windows QQ 账号，请选择右侧下拉列表中的本次登录账号",
+        identities.len()
+    ))
+}
+
+fn friend_gids_without_self(captured_gids: &[String], own_gid: &str) -> Vec<String> {
+    let own_gid = own_gid.trim();
+    if own_gid.is_empty() {
+        return captured_gids.to_vec();
+    }
+    captured_gids
+        .iter()
+        .filter(|gid| gid.trim() != own_gid)
+        .cloned()
+        .collect()
 }
 
 fn sync_completion_detail(
@@ -824,6 +982,66 @@ mod tests {
 
         assert!(detail.contains("已稳定确认并锁定"));
         assert!(!detail.contains("切换"));
+    }
+
+    #[test]
+    fn one_visible_account_is_selected_automatically() {
+        let candidates = vec![identity("3170105001", "账号一")];
+
+        let selected = choose_waiting_identity(&candidates, None).unwrap();
+
+        assert_eq!(selected.qq_number, "3170105001");
+    }
+
+    #[test]
+    fn multiple_visible_accounts_require_an_explicit_selection() {
+        let candidates = vec![
+            identity("1343475483", "账号一"),
+            identity("3170105001", "账号二"),
+        ];
+
+        let error = choose_waiting_identity(&candidates, None).unwrap_err();
+
+        assert!(error.contains("请选择"));
+    }
+
+    #[test]
+    fn multiple_visible_accounts_use_the_selected_qq_number() {
+        let candidates = vec![
+            identity("1343475483", "账号一"),
+            identity("3170105001", "账号二"),
+        ];
+
+        let selected = choose_waiting_identity(&candidates, Some("3170105001")).unwrap();
+
+        assert_eq!(selected.nickname, "账号二");
+    }
+
+    #[test]
+    fn official_friend_gids_exclude_the_current_farm_account() {
+        let captured = vec!["10001".to_owned(), "10002".to_owned(), "10003".to_owned()];
+
+        let filtered = friend_gids_without_self(&captured, "10002");
+
+        assert_eq!(filtered, vec!["10001".to_owned(), "10003".to_owned()]);
+    }
+
+    #[test]
+    fn official_friend_gids_are_unchanged_when_current_gid_is_unknown() {
+        let captured = vec!["10001".to_owned(), "10002".to_owned()];
+
+        let filtered = friend_gids_without_self(&captured, "  ");
+
+        assert_eq!(filtered, captured);
+    }
+
+    #[test]
+    fn official_friend_gids_can_be_empty_after_excluding_self() {
+        let captured = vec!["10002".to_owned()];
+
+        let filtered = friend_gids_without_self(&captured, "10002");
+
+        assert!(filtered.is_empty());
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     time::Duration,
@@ -26,54 +27,73 @@ struct LoginEntry {
     avatar_url: String,
 }
 
-pub fn detect() -> Result<LocalQqIdentity, String> {
+pub fn detect_all() -> Result<Vec<LocalQqIdentity>, String> {
     let app_data = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .ok_or_else(|| "无法定位 Windows QQ 配置目录".to_owned())?;
-    detect_from_qq_root(&app_data.join("QQ"))
+    detect_all_from_qq_root(&app_data.join("QQ"))
 }
 
-pub async fn detect_async() -> Result<LocalQqIdentity, String> {
-    tokio::task::spawn_blocking(detect)
-        .await
-        .map_err(|error| format!("QQ 身份检测任务异常结束: {error}"))?
-}
-
-pub async fn detect_stable_async() -> Result<LocalQqIdentity, String> {
-    tokio::time::timeout(STABLE_DETECTION_TIMEOUT, detect_stable_async_inner())
+pub async fn detect_stable_all_async() -> Result<Vec<LocalQqIdentity>, String> {
+    tokio::time::timeout(STABLE_DETECTION_TIMEOUT, detect_stable_all_async_inner())
         .await
         .map_err(|_| "读取 QQ 主界面超过 2 秒，本次不会自动绑定 QQ 号".to_owned())?
 }
 
-async fn detect_stable_async_inner() -> Result<LocalQqIdentity, String> {
-    let first = detect_async().await?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    let second = detect_async().await?;
-    confirm_stable_identity(first, second)
+pub async fn detect_selected_stable_async(qq_number: &str) -> Result<LocalQqIdentity, String> {
+    let identities = detect_stable_all_async().await?;
+    identities
+        .into_iter()
+        .find(|identity| identity.qq_number == qq_number)
+        .ok_or_else(|| format!("当前 QQ 主窗口中未找到所选账号 {qq_number}，请重新选择"))
 }
 
-fn confirm_stable_identity(
-    first: LocalQqIdentity,
-    mut second: LocalQqIdentity,
-) -> Result<LocalQqIdentity, String> {
-    if first.qq_number != second.qq_number || first.nickname != second.nickname {
+async fn detect_stable_all_async_inner() -> Result<Vec<LocalQqIdentity>, String> {
+    let first = detect_all_async().await?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let second = detect_all_async().await?;
+    confirm_stable_identities(first, second)
+}
+
+async fn detect_all_async() -> Result<Vec<LocalQqIdentity>, String> {
+    tokio::task::spawn_blocking(detect_all)
+        .await
+        .map_err(|error| format!("QQ 身份检测任务异常结束: {error}"))?
+}
+
+fn confirm_stable_identities(
+    first: Vec<LocalQqIdentity>,
+    mut second: Vec<LocalQqIdentity>,
+) -> Result<Vec<LocalQqIdentity>, String> {
+    let first_keys = first
+        .iter()
+        .map(|identity| (identity.qq_number.clone(), identity.nickname.clone()))
+        .collect::<Vec<_>>();
+    let second_keys = second
+        .iter()
+        .map(|identity| (identity.qq_number.clone(), identity.nickname.clone()))
+        .collect::<Vec<_>>();
+    if first_keys != second_keys {
         return Err(format!(
-            "QQ 正在切换账号：连续两次检测分别为 {} / {}，本次不会绑定 QQ 号",
-            first.qq_number, second.qq_number
+            "QQ 登录实例正在变化：连续两次检测到的账号数量为 {} / {}，请稍后重试",
+            first.len(),
+            second.len()
         ));
     }
-    second.source = "qq_ui_stable_unique_nickname";
-    second.verification_detail = "QQ 前台昵称 + login.enc 唯一匹配 + 连续两次一致";
+    for identity in &mut second {
+        identity.source = "qq_ui_stable_visible_accounts";
+        identity.verification_detail = "QQ 主界面昵称 + login.enc 匹配 + 连续两次一致";
+    }
     Ok(second)
 }
 
-fn detect_from_qq_root(qq_root: &Path) -> Result<LocalQqIdentity, String> {
-    let visible_nickname = crate::qq_window::current_nickname()?;
+fn detect_all_from_qq_root(qq_root: &Path) -> Result<Vec<LocalQqIdentity>, String> {
+    let visible_nicknames = crate::qq_window::visible_nicknames()?;
     let path = qq_root.join("auth").join("login.enc");
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("读取 Windows QQ 登录信息失败: {error}"))?;
     let entries = parse_login_entries(content.trim_start_matches('\u{feff}'))?;
-    resolve_identity(entries, &visible_nickname)
+    resolve_identities(entries, &visible_nicknames)
 }
 
 fn parse_login_entries(content: &str) -> Result<Vec<LoginEntry>, String> {
@@ -118,34 +138,37 @@ fn parse_login_entries(content: &str) -> Result<Vec<LoginEntry>, String> {
     Ok(entries)
 }
 
-fn resolve_identity(
+fn resolve_identities(
     entries: Vec<LoginEntry>,
-    visible_nickname: &str,
-) -> Result<LocalQqIdentity, String> {
-    let visible_nickname = visible_nickname.trim();
-    if visible_nickname.is_empty() {
+    visible_nicknames: &[String],
+) -> Result<Vec<LocalQqIdentity>, String> {
+    let visible_nicknames = visible_nicknames
+        .iter()
+        .map(|nickname| nickname.trim())
+        .filter(|nickname| !nickname.is_empty())
+        .collect::<BTreeSet<_>>();
+    if visible_nicknames.is_empty() {
         return Err("QQ 主界面昵称为空，本次不会自动绑定 QQ 号".to_owned());
     }
-    let mut matches = entries
-        .iter()
-        .filter(|entry| entry.nickname == visible_nickname);
-    let matched_entry = matches.next().ok_or_else(|| {
-        format!(
-            "QQ 主界面显示“{visible_nickname}”，但登录列表中没有对应账号，本次不会自动绑定 QQ 号"
-        )
-    })?;
-    if matches.next().is_some() {
+
+    let identities = entries
+        .into_iter()
+        .filter(|entry| visible_nicknames.contains(entry.nickname.as_str()))
+        .map(|entry| LocalQqIdentity {
+            qq_number: entry.qq_number,
+            nickname: entry.nickname,
+            avatar_url: entry.avatar_url,
+            source: "qq_ui_visible_account",
+            verification_detail: "QQ 主界面昵称 + login.enc 匹配",
+        })
+        .collect::<Vec<_>>();
+    if identities.is_empty() {
         return Err(format!(
-            "QQ 主界面显示“{visible_nickname}”，但该昵称对应多个账号，无法唯一确认 QQ 号"
+            "QQ 主界面显示的账号（{}）均未在登录列表中找到，本次不会自动绑定 QQ 号",
+            visible_nicknames.into_iter().collect::<Vec<_>>().join("、")
         ));
     }
-    Ok(LocalQqIdentity {
-        qq_number: matched_entry.qq_number.clone(),
-        nickname: matched_entry.nickname.clone(),
-        avatar_url: matched_entry.avatar_url.clone(),
-        source: "qq_ui_unique_nickname",
-        verification_detail: "QQ 前台昵称 + login.enc 唯一匹配",
-    })
+    Ok(identities)
 }
 
 fn value_text(value: Option<&Value>) -> String {
@@ -178,7 +201,7 @@ mod tests {
 
     #[test]
     fn matches_the_unique_login_entry_for_the_visible_qq_nickname() {
-        let identity = resolve_identity(
+        let identities = resolve_identities(
             entries(
                 r#"{
                   "account":"3170105001",
@@ -188,17 +211,61 @@ mod tests {
                   ]
                 }"#,
             ),
-            "旧账号",
+            &["旧账号".to_owned()],
         )
         .unwrap();
+        let identity = &identities[0];
         assert_eq!(identity.qq_number, "3170105001");
         assert_eq!(identity.nickname, "旧账号");
-        assert_eq!(identity.source, "qq_ui_unique_nickname");
+        assert_eq!(identity.source, "qq_ui_visible_account");
+    }
+
+    #[test]
+    fn lists_each_visible_windows_qq_account_for_explicit_selection() {
+        let identities = resolve_identities(
+            entries(
+                r#"{
+                  "loginList":[
+                    {"uin":"1343475483","nickName":"账号一","faceUrl":""},
+                    {"uin":"3170105001","nickName":"账号二","faceUrl":""},
+                    {"uin":"87654321","nickName":"未打开账号","faceUrl":""}
+                  ]
+                }"#,
+            ),
+            &["账号一".to_owned(), "账号二".to_owned()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            identities
+                .iter()
+                .map(|identity| identity.qq_number.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1343475483", "3170105001"]
+        );
+    }
+
+    #[test]
+    fn keeps_duplicate_nicknames_as_separate_selectable_accounts() {
+        let identities = resolve_identities(
+            entries(
+                r#"{"loginList":[
+                    {"uin":"12345678","nickName":"同名账号"},
+                    {"uin":"87654321","nickName":"同名账号"}
+                ]}"#,
+            ),
+            &["同名账号".to_owned()],
+        )
+        .unwrap();
+
+        assert_eq!(identities.len(), 2);
+        assert_eq!(identities[0].qq_number, "12345678");
+        assert_eq!(identities[1].qq_number, "87654321");
     }
 
     #[test]
     fn rejects_a_visible_nickname_missing_from_the_login_list() {
-        let result = resolve_identity(
+        let result = resolve_identities(
             entries(
                 r#"{
                   "loginList":[
@@ -207,34 +274,21 @@ mod tests {
                   ]
                 }"#,
             ),
-            "另一个账号",
+            &["另一个账号".to_owned()],
         );
-        assert!(result.unwrap_err().contains("没有对应账号"));
-    }
-
-    #[test]
-    fn rejects_duplicate_nicknames_in_the_login_list() {
-        let result = resolve_identity(
-            entries(
-                r#"{"loginList":[
-                    {"uin":"12345678","nickName":"同名账号"},
-                    {"uin":"87654321","nickName":"同名账号"}
-                ]}"#,
-            ),
-            "同名账号",
-        );
-        assert!(result.unwrap_err().contains("对应多个账号"));
+        assert!(result.unwrap_err().contains("均未在登录列表中找到"));
     }
 
     #[test]
     fn supports_numeric_uin_and_uses_qlogo_fallback() {
-        let identity = resolve_identity(
+        let identities = resolve_identities(
             entries(
                 r#"{"loginList":[{"uin":12345678,"nickName":"账号","faceUrl":"","isUserLogin":true}]}"#,
             ),
-            "账号",
+            &["账号".to_owned()],
         )
         .unwrap();
+        let identity = &identities[0];
         assert!(identity.avatar_url.contains("nk=12345678"));
     }
 
@@ -254,17 +308,19 @@ mod tests {
             source: "test",
             verification_detail: "test",
         };
-        assert!(confirm_stable_identity(first, second).is_err());
+        assert!(confirm_stable_identities(vec![first], vec![second]).is_err());
     }
 
     #[tokio::test]
     #[ignore = "requires a running Windows QQ main window and local login.enc"]
-    async fn detects_the_live_windows_qq_identity() {
-        let identity = detect_stable_async().await.unwrap();
-        eprintln!(
-            "live QQ identity: {} / {} ({})",
-            identity.nickname, identity.qq_number, identity.verification_detail
+    async fn detects_the_live_windows_qq_identities() {
+        let identities = detect_stable_all_async().await.unwrap();
+        eprintln!("live QQ account count: {}", identities.len());
+        assert!(!identities.is_empty());
+        assert!(
+            identities
+                .iter()
+                .all(|identity| !identity.qq_number.is_empty())
         );
-        assert!(!identity.qq_number.is_empty());
     }
 }

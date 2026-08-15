@@ -33,6 +33,8 @@ struct ApiEnvelope {
     data: Option<Value>,
     #[serde(default, rename = "addedCount")]
     added_count: Option<usize>,
+    #[serde(default, rename = "removedCount")]
+    removed_count: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +74,13 @@ struct FriendGidsPayload<'a> {
 pub struct FriendGidSyncResult {
     pub submitted_count: usize,
     pub added_count: usize,
+    pub known_friend_gid_count: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendGidCleanupResult {
+    pub removed_count: usize,
     pub known_friend_gid_count: usize,
 }
 
@@ -217,15 +226,39 @@ impl ServerClient {
         let data = envelope
             .data
             .ok_or_else(|| "服务器没有返回好友 GID 设置".to_owned())?;
-        let known_friend_gid_count = data
-            .get("knownFriendGids")
-            .and_then(Value::as_array)
-            .map(Vec::len)
-            .ok_or_else(|| "服务器返回的好友 GID 设置无效".to_owned())?;
+        let known_friend_gid_count = known_friend_gid_count(&data)?;
         Ok(FriendGidSyncResult {
             submitted_count: gids.len(),
             added_count: envelope.added_count.unwrap_or_default(),
             known_friend_gid_count,
+        })
+    }
+
+    pub async fn batch_remove_friend_gids(
+        &self,
+        server_url: &str,
+        token: &str,
+        account_id: &str,
+        gids: &[String],
+    ) -> Result<FriendGidCleanupResult, String> {
+        validate_friend_gids(gids)?;
+        let endpoint = endpoint(server_url, "/api/friend-known-gids/batch-remove")?;
+        let response = self
+            .client
+            .post(endpoint)
+            .header("x-admin-token", token)
+            .header("x-account-id", account_id)
+            .json(&FriendGidsPayload { gids })
+            .send()
+            .await
+            .map_err(|error| format!("清理自身 GID 失败: {error}"))?;
+        let envelope = parse_response(response).await?;
+        let data = envelope
+            .data
+            .ok_or_else(|| "服务器没有返回好友 GID 设置".to_owned())?;
+        Ok(FriendGidCleanupResult {
+            removed_count: envelope.removed_count.unwrap_or_default(),
+            known_friend_gid_count: known_friend_gid_count(&data)?,
         })
     }
 
@@ -300,6 +333,13 @@ fn validate_friend_gids(gids: &[String]) -> Result<(), String> {
         return Err("好友 GID 格式无效".to_owned());
     }
     Ok(())
+}
+
+fn known_friend_gid_count(data: &Value) -> Result<usize, String> {
+    data.get("knownFriendGids")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| "服务器返回的好友 GID 设置无效".to_owned())
 }
 
 impl AccountProfile {
@@ -698,6 +738,39 @@ mod tests {
             .await;
 
         assert!(result.unwrap_err().contains("GID"));
+    }
+
+    #[tokio::test]
+    async fn friend_cleanup_removes_the_current_gid_from_the_selected_account() {
+        let (server_url, request_receiver) = serve_http_responses(vec![
+            r#"{"ok":true,"data":{"knownFriendGids":[10001,10003]},"removedCount":1}"#,
+        ])
+        .await;
+        let gids = vec!["10002".to_owned()];
+
+        let result = ServerClient::new()
+            .unwrap()
+            .batch_remove_friend_gids(&server_url, "synthetic-token", "7", &gids)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            FriendGidCleanupResult {
+                removed_count: 1,
+                known_friend_gid_count: 2,
+            }
+        );
+        let requests = request_receiver.await.unwrap();
+        let request = &requests[0];
+        assert!(request.starts_with("POST /api/friend-known-gids/batch-remove HTTP/1.1"));
+        assert!(request.to_ascii_lowercase().contains("x-account-id: 7"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("x-admin-token: synthetic-token")
+        );
+        assert!(request.contains(r#"{"gids":["10002"]}"#));
     }
 
     async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {

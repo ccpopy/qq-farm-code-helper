@@ -27,10 +27,10 @@ use windows::{
     core::{BOOL, PWSTR},
 };
 
-pub fn current_nickname() -> Result<String, String> {
+pub fn visible_nicknames() -> Result<Vec<String>, String> {
     #[cfg(windows)]
     {
-        std::thread::spawn(read_current_nickname)
+        std::thread::spawn(read_visible_nicknames)
             .join()
             .map_err(|_| "读取 QQ 主界面时发生异常，本次不会自动绑定 QQ 号".to_owned())?
     }
@@ -42,7 +42,7 @@ pub fn current_nickname() -> Result<String, String> {
 }
 
 #[cfg(windows)]
-fn read_current_nickname() -> Result<String, String> {
+fn read_visible_nicknames() -> Result<Vec<String>, String> {
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED)
             .ok()
@@ -60,13 +60,10 @@ fn read_current_nickname() -> Result<String, String> {
             nicknames.insert(nickname);
         }
     }
-    unique_nickname(&nicknames).ok_or_else(|| {
-        if nicknames.len() > 1 {
-            "检测到多个 QQ 主界面昵称，无法唯一确认当前账号".to_owned()
-        } else {
-            "无法从 QQ 主界面读取当前昵称，请保持新版 QQ 主窗口已打开".to_owned()
-        }
-    })
+    if nicknames.is_empty() {
+        return Err("无法从 QQ 主界面读取当前昵称，请保持新版 QQ 主窗口已打开".to_owned());
+    }
+    Ok(nicknames.into_iter().collect())
 }
 
 #[cfg(windows)]
@@ -259,9 +256,9 @@ mod tests {
 
     #[test]
     #[ignore = "requires a running Windows QQ main window"]
-    fn reads_current_qq_nickname() {
-        let nickname = current_nickname().unwrap();
-        eprintln!("current QQ nickname: {nickname}");
-        assert!(!nickname.is_empty());
+    fn reads_visible_qq_nicknames() {
+        let nicknames = visible_nicknames().unwrap();
+        eprintln!("visible QQ account count: {}", nicknames.len());
+        assert!(!nicknames.is_empty());
     }
 }

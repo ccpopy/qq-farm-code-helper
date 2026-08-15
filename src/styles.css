@@ -34,7 +34,7 @@ body {
     linear-gradient(180deg, #f7f3e8 0, var(--page) 42%);
 }
 
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: 0.48; }
 button:focus-visible, .switch-field input:focus-visible + i { outline: 2px solid var(--green); outline-offset: 2px; }
@@ -272,9 +272,22 @@ button:focus-visible, .switch-field input:focus-visible + i { outline: 2px solid
 .avatar-shell img { display: none; width: 100%; height: 100%; object-fit: cover; }
 .avatar-shell img.visible { display: block; }
 .avatar-shell span { font-size: 25px; }
-.profile-copy { min-width: 0; }
+.profile-copy { min-width: 0; flex: 1; }
 .profile-copy strong { display: block; overflow: hidden; color: #33392f; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
 .profile-copy span { display: block; margin-top: 5px; color: #878a81; font-size: 10px; }
+.profile-account-picker { min-width: 0; }
+.profile-picker-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 22px; margin-bottom: 3px; }
+.profile-picker-heading label { color: #7b8177; font-size: 8px; font-weight: 700; letter-spacing: 0.04em; }
+.profile-picker-heading button { display: grid; place-items: center; width: 22px; height: 22px; padding: 0; color: #669060; border: 0; border-radius: 50%; background: transparent; transition: color 150ms ease, background 150ms ease; }
+.profile-picker-heading button:hover:not(:disabled) { color: #3f7c3e; background: #edf4e6; }
+.profile-picker-heading button svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform 180ms ease; }
+.profile-picker-heading button:hover:not(:disabled) svg { transform: rotate(-35deg); }
+.profile-select-wrap { position: relative; }
+.profile-select-wrap select { width: 100%; height: 34px; padding: 0 29px 0 9px; overflow: hidden; color: #343b31; outline: none; border: 1px solid #d7ddcf; border-radius: 9px; background: rgba(255,255,255,0.68); font-size: 10px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; appearance: none; transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease; }
+.profile-select-wrap select:hover:not(:disabled) { border-color: #bfcdb5; background: #fffefa; }
+.profile-select-wrap select:focus { border-color: #86b079; background: #fffefa; box-shadow: 0 0 0 3px rgba(87, 148, 73, 0.09); }
+.profile-select-wrap select:disabled { color: #92968e; background: #f2f0e8; opacity: 0.72; }
+.profile-select-wrap > svg { position: absolute; top: 50%; right: 9px; width: 14px; height: 14px; fill: none; stroke: #7f9578; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transform: translateY(-50%); pointer-events: none; }
 .profile-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 15px 0 0; }
 .profile-meta div { padding: 9px; border: 1px solid #ebe7dc; border-radius: 10px; background: rgba(255,255,255,0.62); }
 .profile-meta dt { color: #989a91; font-size: 9px; }
@@ -303,10 +316,6 @@ button:focus-visible, .switch-field input:focus-visible + i { outline: 2px solid
 .secret-input { position: relative; }
 .secret-input input { padding-right: 61px; }
 .secret-input button { position: absolute; right: 6px; top: 6px; height: 25px; padding: 0 9px; color: #527f4f; border: 0; border-radius: 7px; background: #edf4e6; font-size: 9px; }
-.detect-input { position: relative; }
-.detect-input input { padding-right: 77px; }
-.detect-input button { position: absolute; right: 6px; top: 6px; height: 25px; padding: 0 9px; color: #527f4f; border: 0; border-radius: 7px; background: #edf4e6; font-size: 9px; }
-
 .settings-actions { display: flex; align-items: center; gap: 8px; margin-top: 13px; }
 .text-action { padding: 8px 10px; color: #6f756a; border: 1px solid #dfdcd2; border-radius: 9px; background: #fffdf8; font-size: 10px; }
 .text-action:hover { color: var(--green-dark); border-color: #c3d4b6; }
@@ -360,7 +369,6 @@ button:focus-visible, .switch-field input:focus-visible + i { outline: 2px solid
 @media (max-width: 820px) {
   .brand-row, .app-shell { width: calc(100% - 28px); }
   .workspace-grid { grid-template-columns: 1fr; }
-  .profile-card { display: none; }
   .form-grid { grid-template-columns: 1fr 1fr; }
   .field-wide { grid-column: 1 / -1; }
   .update-card { grid-template-columns: 1fr; }

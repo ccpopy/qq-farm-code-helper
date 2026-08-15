@@ -86,8 +86,27 @@
                 <span id="profileFallback" aria-hidden="true">🌱</span>
               </div>
               <div class="profile-copy">
-                <strong id="profileName">同步后显示农场昵称</strong>
-                <span id="profileIdentity">QQ 号需在设置中选填</span>
+                <div id="profileStaticIdentity">
+                  <strong id="profileName">同步后显示农场昵称</strong>
+                  <span id="profileIdentity">单账号自动确认，多账号可选择</span>
+                </div>
+                <div class="profile-account-picker hidden" id="profileAccountPicker">
+                  <div class="profile-picker-heading">
+                    <label for="qqNumber">本次进入农场</label>
+                    <button id="detectQqButton" type="button" title="重新检测 Windows QQ" aria-label="重新检测 Windows QQ">
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M19 8a8 8 0 1 0 1 6"></path>
+                        <path d="M19 3v5h-5"></path>
+                      </svg>
+                    </button>
+                  </div>
+                  <div class="profile-select-wrap">
+                    <select id="qqNumber" aria-label="选择本次登录的 Windows QQ">
+                      <option value="">等待检测 Windows QQ</option>
+                    </select>
+                    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4"></path></svg>
+                  </div>
+                </div>
               </div>
             </div>
             <dl class="profile-meta">
@@ -137,15 +156,6 @@
             <label class="field">
               <span>账号备注</span>
               <input id="accountName" type="text" maxlength="40" placeholder="Windows QQ">
-            </label>
-
-            <label class="field">
-              <span>QQ 号（前台确认）</span>
-              <div class="detect-input">
-                <input id="qqNumber" type="text" inputmode="numeric" maxlength="12" placeholder="等待前台确认" readonly>
-                <button id="detectQqButton" type="button">重新检测</button>
-              </div>
-              <small>每 2 秒检查 QQ 主界面并在 login.enc 中唯一匹配；不确定时立即清空 QQ 号。</small>
             </label>
 
             <label class="field">

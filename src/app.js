@@ -12,6 +12,7 @@ const elements = {
   installUpdateButton: document.querySelector('#installUpdateButton'),
   proxyPort: document.querySelector('#proxyPort'),
   qqNumber: document.querySelector('#qqNumber'),
+  profileAccountPicker: document.querySelector('#profileAccountPicker'),
   profileAvatar: document.querySelector('#profileAvatar'),
   profileFallback: document.querySelector('#profileFallback'),
   profileGid: document.querySelector('#profileGid'),
@@ -20,6 +21,7 @@ const elements = {
   profileNote: document.querySelector('#profileNote'),
   profileOpenId: document.querySelector('#profileOpenId'),
   profileState: document.querySelector('#profileState'),
+  profileStaticIdentity: document.querySelector('#profileStaticIdentity'),
   saveButton: document.querySelector('#saveButton'),
   serverToken: document.querySelector('#serverToken'),
   serverUrl: document.querySelector('#serverUrl'),
@@ -56,13 +58,17 @@ const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
 const identityPollInterval = 2000
 
 let currentPhase = 'idle'
+let currentIdentityCandidates = []
 let currentLocalIdentity = null
 let currentIdentityError = ''
 let currentRemoteProfile = null
 let hasIdentityResult = false
 let identityRequest = null
+let identitySelectionPending = false
 let latestUpdate = null
+let preferredQqNumber = ''
 let startPending = false
+let stopPending = false
 let toastSequence = 0
 
 const toastIcons = {
@@ -274,7 +280,7 @@ function showMessage(message, { type = 'success', title, toast = true, duration,
 function fillSettings(data) {
   elements.serverUrl.value = data.settings.server_url || ''
   elements.accountName.value = data.settings.account_name || 'Windows QQ'
-  elements.qqNumber.value = data.settings.qq_number || ''
+  preferredQqNumber = data.settings.qq_number || ''
   elements.autoSync.checked = data.settings.auto_sync !== false
   elements.syncOfficialFriends.checked = data.settings.sync_official_friends !== false
   elements.proxyPort.value = data.settings.proxy_port || 8899
@@ -292,7 +298,6 @@ function syncTaskUi() {
     elements.accountName,
     elements.autoSync,
     elements.syncOfficialFriends,
-    elements.detectQqButton,
     elements.saveButton,
     elements.serverToken,
     elements.serverUrl,
@@ -301,9 +306,18 @@ function syncTaskUi() {
     elements.proxyPort,
   ])
     element.disabled = isActive
+  const canChooseQq = !startPending && (!isActive || currentPhase === 'waiting_login')
+  elements.detectQqButton.disabled = !canChooseQq || identitySelectionPending
+  elements.qqNumber.disabled = !canChooseQq
+    || identitySelectionPending
+    || currentIdentityCandidates.length === 0
   elements.syncOfficialFriends.disabled = isActive || !elements.autoSync.checked
   elements.startButton.disabled = isActive
+  elements.stopButton.disabled = !isActive
+    || currentPhase === 'preparing_proxy'
+    || stopPending
   elements.cleanupButton.disabled = startPending
+    || stopPending
     || currentPhase === 'preparing_proxy'
   const codeActive = ['preparing_proxy', 'waiting_login', 'code_captured', 'syncing'].includes(currentPhase)
   elements.startButtonText.textContent = codeActive ? '正在获取…' : '启动获取'
@@ -427,7 +441,10 @@ async function installUpdate() {
 }
 
 function renderProfile(profile) {
-  elements.profileState.textContent = profile.running ? '运行中' : '已同步'
+  const accountCount = currentIdentityCandidates.length > 1
+    ? ` · ${currentIdentityCandidates.length} 个`
+    : ''
+  elements.profileState.textContent = `${profile.running ? '运行中' : '已同步'}${accountCount}`
   elements.profileState.classList.add('ready')
   elements.profileName.textContent = profile.nickname || profile.accountName || `远程账号 #${profile.accountId}`
   elements.profileIdentity.textContent = profile.qqNumber
@@ -457,13 +474,16 @@ function setProfileAvatar(avatarUrl) {
 }
 
 function renderLocalIdentity(identity) {
-  elements.profileState.textContent = '本机前台确认'
+  elements.profileState.textContent = currentIdentityCandidates.length > 1
+    ? `${currentIdentityCandidates.length} 个账号`
+    : '本机账号已确认'
   elements.profileState.classList.add('ready')
   elements.profileName.textContent = identity.nickname || 'Windows QQ'
   elements.profileIdentity.textContent = `QQ ${identity.qqNumber}`
   elements.profileGid.textContent = '同步后回填'
   elements.profileOpenId.textContent = '同步后回填'
-  elements.profileNote.textContent = `已读取 QQ 主界面昵称“${identity.nickname || '未命名'}”，并在本地登录列表中唯一匹配。`
+  const switchHint = currentIdentityCandidates.length > 1 ? '；可在账号下拉框切换其他账号' : ''
+  elements.profileNote.textContent = `已锁定“${identity.nickname || '未命名'}”（QQ ${identity.qqNumber}）${switchHint}，捕获后会再次复核。`
   setProfileAvatar(identity.avatarUrl)
 }
 
@@ -480,7 +500,9 @@ function renderPendingIdentity() {
 }
 
 function renderUnconfirmedIdentity(error) {
-  elements.profileState.textContent = '未确认'
+  elements.profileState.textContent = currentIdentityCandidates.length > 1
+    ? `请选择 · ${currentIdentityCandidates.length} 个`
+    : '未确认'
   elements.profileState.classList.remove('ready')
   elements.profileName.textContent = '未确认当前 Windows QQ'
   elements.profileIdentity.textContent = '本次不会绑定 QQ 号'
@@ -626,11 +648,21 @@ async function startCapture() {
 }
 
 async function stopCapture() {
+  if (stopPending)
+    return
+  stopPending = true
+  setBusy(elements.stopButton, true, '正在恢复…')
+  syncTaskUi()
   try {
     await invoke('stop_capture')
   }
   catch (error) {
     showMessage(String(error), { type: 'error', title: '停止失败' })
+  }
+  finally {
+    stopPending = false
+    setBusy(elements.stopButton, false)
+    syncTaskUi()
   }
 }
 
@@ -659,31 +691,125 @@ async function copyCode() {
   }
 }
 
-async function detectLocalQq({ overwrite = true, notify = true, render = true } = {}) {
+function identityByQqNumber(qqNumber) {
+  return currentIdentityCandidates.find(identity => identity.qqNumber === qqNumber) || null
+}
+
+function preferredDetectedQqNumber(identities) {
+  if (identities.length === 1)
+    return identities[0].qqNumber
+  for (const qqNumber of [elements.qqNumber.value, currentLocalIdentity?.qqNumber, preferredQqNumber]) {
+    if (qqNumber && identities.some(identity => identity.qqNumber === qqNumber))
+      return qqNumber
+  }
+  return ''
+}
+
+function renderQqOptions(identities, selectedQqNumber) {
+  const showPicker = identities.length !== 1
+  elements.profileAccountPicker.classList.toggle('hidden', !showPicker)
+  elements.profileStaticIdentity.classList.toggle('hidden', showPicker)
+  const placeholder = document.createElement('option')
+  placeholder.value = ''
+  placeholder.textContent = identities.length > 1
+    ? `检测到 ${identities.length} 个账号，请选择`
+    : '等待检测 Windows QQ'
+  placeholder.disabled = identities.length > 0
+  const options = identities.map((identity) => {
+    const option = document.createElement('option')
+    option.value = identity.qqNumber
+    option.textContent = `${identity.nickname || '未命名'}（QQ ${identity.qqNumber}）`
+    return option
+  })
+  elements.qqNumber.replaceChildren(placeholder, ...options)
+  elements.qqNumber.value = selectedQqNumber
+}
+
+async function confirmLocalQqSelection(qqNumber, { notify = true, render = true } = {}) {
+  if (!qqNumber) {
+    currentLocalIdentity = null
+    currentIdentityError = currentIdentityCandidates.length > 1
+      ? `检测到 ${currentIdentityCandidates.length} 个 Windows QQ 账号，请选择本次进入农场的账号。`
+      : '尚未检测到可确认的 Windows QQ。'
+    if (render)
+      renderAccountCard()
+    return null
+  }
+
+  identitySelectionPending = true
+  syncTaskUi()
+  try {
+    const identity = await invoke('select_local_qq', { qqNumber })
+    currentLocalIdentity = identity
+    currentIdentityError = ''
+    preferredQqNumber = identity.qqNumber
+    elements.qqNumber.value = identity.qqNumber
+    dismissToast('identity-unavailable')
+    if (render)
+      renderAccountCard()
+    if (notify) {
+      showMessage(`本次已锁定：${identity.nickname || '未命名'}（QQ ${identity.qqNumber}）。`, {
+        type: 'success',
+        title: '已选择 Windows QQ',
+      })
+    }
+    return identity
+  }
+  catch (error) {
+    currentLocalIdentity = null
+    currentIdentityError = String(error)
+    if (render)
+      renderAccountCard()
+    if (notify)
+      showMessage(String(error), { type: 'warning', title: 'QQ 账号选择失败', duration: 9000 })
+    return null
+  }
+  finally {
+    identitySelectionPending = false
+    syncTaskUi()
+  }
+}
+
+async function detectLocalQq({ notify = true, render = true } = {}) {
   if (notify)
     setBusy(elements.detectQqButton, true, '检测中…')
   try {
     if (!identityRequest)
-      identityRequest = invoke('detect_local_qq').finally(() => { identityRequest = null })
-    const identity = await identityRequest
+      identityRequest = invoke('detect_local_qqs').finally(() => { identityRequest = null })
+    const identities = await identityRequest
     hasIdentityResult = true
-    currentLocalIdentity = identity
-    currentIdentityError = ''
-    dismissToast('identity-unavailable')
-    if (overwrite || !elements.qqNumber.value.trim())
-      elements.qqNumber.value = identity.qqNumber
-    if (render)
-      renderAccountCard()
-    if (notify)
-      showMessage(`当前账号：${identity.nickname || '未命名'}（QQ ${identity.qqNumber}）。`, { type: 'success', title: '已确认 Windows QQ' })
-    return identity
+    currentIdentityCandidates = Array.isArray(identities) ? identities : []
+    const selectedQqNumber = preferredDetectedQqNumber(currentIdentityCandidates)
+    renderQqOptions(currentIdentityCandidates, selectedQqNumber)
+
+    if (!selectedQqNumber) {
+      currentLocalIdentity = null
+      currentIdentityError = `检测到 ${currentIdentityCandidates.length} 个 Windows QQ 账号，请在下拉列表选择本次进入农场的账号。`
+      if (render)
+        renderAccountCard()
+      if (notify)
+        showMessage(currentIdentityError, { type: 'warning', title: '请选择 Windows QQ', duration: 9000 })
+      return null
+    }
+
+    const selectedIdentity = identityByQqNumber(selectedQqNumber)
+    if (currentLocalIdentity?.qqNumber === selectedQqNumber) {
+      currentLocalIdentity = selectedIdentity
+      currentIdentityError = ''
+      if (render)
+        renderAccountCard()
+      if (notify)
+        showMessage(`当前账号：${selectedIdentity.nickname || '未命名'}（QQ ${selectedIdentity.qqNumber}）。`, { type: 'success', title: '已确认 Windows QQ' })
+      return selectedIdentity
+    }
+    return confirmLocalQqSelection(selectedQqNumber, { notify, render })
   }
   catch (error) {
     hasIdentityResult = true
+    currentIdentityCandidates = []
     currentLocalIdentity = null
     currentIdentityError = String(error)
-    if (overwrite)
-      elements.qqNumber.value = ''
+    renderQqOptions([], '')
     if (render)
       renderAccountCard()
     if (notify)
@@ -702,7 +828,8 @@ function startIdentityMonitor() {
     if (document.hidden)
       return
     const previous = currentLocalIdentity
-    const identity = await detectLocalQq({ overwrite: true, notify: false })
+    const previousCandidateCount = currentIdentityCandidates.length
+    const identity = await detectLocalQq({ notify: false })
     if (previous && !identity) {
       showToast(currentIdentityError || '请保持新版 QQ 主窗口打开。', {
         type: 'warning',
@@ -726,6 +853,22 @@ function startIdentityMonitor() {
         id: 'identity-state',
       })
     }
+    else if (identity && previousCandidateCount <= 1 && currentIdentityCandidates.length > 1) {
+      showToast(`检测到 ${currentIdentityCandidates.length} 个 Windows QQ，当前仍锁定 QQ ${identity.qqNumber}；如需使用其他账号，请在下拉列表切换。`, {
+        type: 'info',
+        title: '可选择其他 QQ 账号',
+        duration: 7000,
+        id: 'identity-state',
+      })
+    }
+    else if (!identity && currentIdentityCandidates.length > 1 && previousCandidateCount !== currentIdentityCandidates.length) {
+      showToast(currentIdentityError, {
+        type: 'warning',
+        title: '请选择 Windows QQ',
+        duration: 9000,
+        id: 'identity-state',
+      })
+    }
   }
   window.setInterval(() => { void refresh() }, identityPollInterval)
   window.addEventListener('focus', () => { void refresh() })
@@ -738,7 +881,7 @@ async function bootstrap() {
   const data = await invoke('get_bootstrap')
   fillSettings(data)
   renderStatus(data.status)
-  const initialIdentity = await detectLocalQq({ overwrite: true, notify: false })
+  const initialIdentity = await detectLocalQq({ notify: false })
   if (!initialIdentity) {
     showMessage(`${currentIdentityError || '尚未检测到 Windows QQ。'} 你仍可先点击“启动获取”启动代理，随后再登录 QQ。`, {
       type: 'warning',
@@ -767,8 +910,8 @@ elements.toggleToken.addEventListener('click', () => {
   elements.serverToken.type = hidden ? 'text' : 'password'
   elements.toggleToken.textContent = hidden ? '隐藏' : '显示'
 })
-elements.qqNumber.addEventListener('input', () => {
-  elements.qqNumber.value = elements.qqNumber.value.replace(/\D/g, '').slice(0, 12)
+elements.qqNumber.addEventListener('change', () => {
+  void confirmLocalQqSelection(elements.qqNumber.value)
 })
 elements.profileAvatar.addEventListener('error', () => {
   elements.profileAvatar.classList.remove('visible')

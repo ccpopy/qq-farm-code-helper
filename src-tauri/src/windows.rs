@@ -7,7 +7,7 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn run_powershell(script: &str) -> Result<String, String> {
-    let encoded = encode_utf16_base64(script);
+    let encoded = encode_utf16_base64(&wrap_powershell_script(script));
     let mut command = Command::new(powershell_path());
     command.args([
         "-NoLogo",
@@ -15,6 +15,8 @@ pub fn run_powershell(script: &str) -> Result<String, String> {
         "-NonInteractive",
         "-ExecutionPolicy",
         "Bypass",
+        "-OutputFormat",
+        "Text",
         "-EncodedCommand",
         &encoded,
     ]);
@@ -48,6 +50,24 @@ fn encode_utf16_base64(script: &str) -> String {
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
     STANDARD.encode(bytes)
+}
+
+fn wrap_powershell_script(script: &str) -> String {
+    format!(
+        r#"
+$ProgressPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+try {{
+  & {{
+{script}
+  }}
+}} catch {{
+  [Console]::Error.WriteLine($_.Exception.Message)
+  exit 1
+}}
+"#
+    )
 }
 
 fn powershell_path() -> String {
