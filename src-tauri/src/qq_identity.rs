@@ -99,10 +99,14 @@ fn detect_all_from_qq_root(qq_root: &Path) -> Result<Vec<LocalQqIdentity>, Strin
 fn parse_login_entries(content: &str) -> Result<Vec<LoginEntry>, String> {
     let data: Value =
         serde_json::from_str(content).map_err(|_| "Windows QQ 登录信息格式无法识别".to_owned())?;
-    let entries = data
-        .get("loginList")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "Windows QQ 登录列表为空，请先登录 QQ".to_owned())?;
+    // 不同版本的 Windows QQ 写出的 login.enc 结构不同：顶层直接是账号数组，或包在 {"loginList": [...]} 里。
+    let entries = match &data {
+        Value::Array(entries) => entries,
+        _ => data
+            .get("loginList")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Windows QQ 登录列表为空，请先登录 QQ".to_owned())?,
+    };
     let entries = entries
         .iter()
         .filter_map(|entry| {
@@ -280,6 +284,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_login_file_whose_top_level_is_an_entry_array() {
+        let identities = resolve_identities(
+            entries(
+                r#"[{"uin":"1343475483","nickName":"账号","faceUrl":"","facePath":"","isUserLogin":true,"isAutoLogin":true,"isQuickLogin":true,"loginType":1}]"#,
+            ),
+            &["账号".to_owned()],
+        )
+        .unwrap();
+        let identity = &identities[0];
+        assert_eq!(identity.qq_number, "1343475483");
+        assert_eq!(identity.nickname, "账号");
+    }
+
+    #[test]
     fn supports_numeric_uin_and_uses_qlogo_fallback() {
         let identities = resolve_identities(
             entries(
@@ -309,6 +327,17 @@ mod tests {
             verification_detail: "test",
         };
         assert!(confirm_stable_identities(vec![first], vec![second]).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires a local Windows QQ login.enc"]
+    fn parses_the_live_login_file() {
+        let app_data = std::env::var_os("APPDATA").map(PathBuf::from).unwrap();
+        let content =
+            fs::read_to_string(app_data.join("QQ").join("auth").join("login.enc")).unwrap();
+        let entries = parse_login_entries(content.trim_start_matches('\u{feff}')).unwrap();
+        eprintln!("live login entry count: {}", entries.len());
+        assert!(!entries.is_empty());
     }
 
     #[tokio::test]
