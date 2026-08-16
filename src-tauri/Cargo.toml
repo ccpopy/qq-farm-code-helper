@@ -1,6 +1,6 @@
 [package]
 name = "qq-farm-code-helper"
-version = "0.1.9"
+version = "0.2.0"
 description = "Windows QQ 农场一次性 Code 本地获取助手"
 authors = ["ccpopy"]
 edition = "2024"

@@ -2,6 +2,7 @@ use crate::{
     certificates::CertificateManager,
     proxy::{self, ProxyMode},
     qq_identity::{self, LocalQqIdentity},
+    qq_login_history::QqLoginHistory,
     server_sync::{FriendGidCleanupResult, FriendGidSyncResult, ServerClient, SyncAccountInput},
     settings::{AppSettings, SettingsStore, SettingsView},
     status::StatusPayload,
@@ -59,6 +60,7 @@ pub struct AppCore {
     diagnostics_path: PathBuf,
     network_recovery: Mutex<()>,
     proxy_manager: SystemProxyManager,
+    qq_login_history: Arc<QqLoginHistory>,
     settings: SettingsStore,
     transport_stop: Mutex<()>,
     runtime: Mutex<RuntimeState>,
@@ -73,12 +75,17 @@ impl AppCore {
             diagnostics_path: data_dir.join("traffic-diagnostics.log"),
             network_recovery: Mutex::new(()),
             proxy_manager: SystemProxyManager::new(data_dir.clone()),
+            qq_login_history: Arc::new(QqLoginHistory::new(data_dir.clone())),
             settings: SettingsStore::new(data_dir),
             transport_stop: Mutex::new(()),
             runtime: Mutex::new(RuntimeState::default()),
             startup_warning: Mutex::new(None),
             exiting: AtomicBool::new(false),
         }
+    }
+
+    pub fn login_history(&self) -> Arc<QqLoginHistory> {
+        self.qq_login_history.clone()
     }
 
     pub fn recover_stale(&self) {
@@ -650,7 +657,7 @@ impl AppCore {
                 if cancellation.is_cancelled() {
                     break;
                 }
-                match qq_identity::detect_stable_all_async().await {
+                match qq_identity::detect_stable_all_async(core.qq_login_history.clone()).await {
                     Ok(identities) => core.adopt_waiting_identities(&app, identities).await,
                     Err(error) => {
                         core.mark_waiting_identity_unconfirmed(&app, error).await;
@@ -766,7 +773,12 @@ impl AppCore {
         let Some(locked_identity) = locked_identity else {
             return;
         };
-        let result = detect_selected_qq_with_retry(&locked_identity.qq_number, 2).await;
+        let result = detect_selected_qq_with_retry(
+            self.qq_login_history.clone(),
+            &locked_identity.qq_number,
+            2,
+        )
+        .await;
         let mut runtime = self.runtime.lock().await;
         match result {
             Ok(current) if current.qq_number == locked_identity.qq_number => {
@@ -850,12 +862,13 @@ fn waiting_identity_detail(previous: Option<&str>, identity: &LocalQqIdentity) -
 }
 
 async fn detect_selected_qq_with_retry(
+    history: Arc<QqLoginHistory>,
     qq_number: &str,
     max_attempts: usize,
 ) -> Result<LocalQqIdentity, String> {
     let mut last_error = "未能确认当前 QQ".to_owned();
     for attempt in 0..max_attempts {
-        match qq_identity::detect_selected_stable_async(qq_number).await {
+        match qq_identity::detect_selected_stable_async(history.clone(), qq_number).await {
             Ok(identity) => return Ok(identity),
             Err(error) => last_error = error,
         }

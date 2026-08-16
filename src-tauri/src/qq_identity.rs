@@ -1,9 +1,11 @@
+use crate::qq_login_history::{ObservedQqAccount, QqLoginHistory};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 use url::Url;
@@ -20,43 +22,46 @@ pub struct LocalQqIdentity {
     pub verification_detail: &'static str,
 }
 
-#[derive(Debug)]
-struct LoginEntry {
-    qq_number: String,
-    nickname: String,
-    avatar_url: String,
-}
-
-pub fn detect_all() -> Result<Vec<LocalQqIdentity>, String> {
+pub fn detect_all(history: &QqLoginHistory) -> Result<Vec<LocalQqIdentity>, String> {
     let app_data = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .ok_or_else(|| "无法定位 Windows QQ 配置目录".to_owned())?;
-    detect_all_from_qq_root(&app_data.join("QQ"))
+    detect_all_from_qq_root(&app_data.join("QQ"), history)
 }
 
-pub async fn detect_stable_all_async() -> Result<Vec<LocalQqIdentity>, String> {
-    tokio::time::timeout(STABLE_DETECTION_TIMEOUT, detect_stable_all_async_inner())
-        .await
-        .map_err(|_| "读取 QQ 主界面超过 2 秒，本次不会自动绑定 QQ 号".to_owned())?
+pub async fn detect_stable_all_async(
+    history: Arc<QqLoginHistory>,
+) -> Result<Vec<LocalQqIdentity>, String> {
+    tokio::time::timeout(
+        STABLE_DETECTION_TIMEOUT,
+        detect_stable_all_async_inner(history),
+    )
+    .await
+    .map_err(|_| "读取 QQ 主界面超过 2 秒，本次不会自动绑定 QQ 号".to_owned())?
 }
 
-pub async fn detect_selected_stable_async(qq_number: &str) -> Result<LocalQqIdentity, String> {
-    let identities = detect_stable_all_async().await?;
+pub async fn detect_selected_stable_async(
+    history: Arc<QqLoginHistory>,
+    qq_number: &str,
+) -> Result<LocalQqIdentity, String> {
+    let identities = detect_stable_all_async(history).await?;
     identities
         .into_iter()
         .find(|identity| identity.qq_number == qq_number)
         .ok_or_else(|| format!("当前 QQ 主窗口中未找到所选账号 {qq_number}，请重新选择"))
 }
 
-async fn detect_stable_all_async_inner() -> Result<Vec<LocalQqIdentity>, String> {
-    let first = detect_all_async().await?;
+async fn detect_stable_all_async_inner(
+    history: Arc<QqLoginHistory>,
+) -> Result<Vec<LocalQqIdentity>, String> {
+    let first = detect_all_async(history.clone()).await?;
     tokio::time::sleep(Duration::from_millis(250)).await;
-    let second = detect_all_async().await?;
+    let second = detect_all_async(history).await?;
     confirm_stable_identities(first, second)
 }
 
-async fn detect_all_async() -> Result<Vec<LocalQqIdentity>, String> {
-    tokio::task::spawn_blocking(detect_all)
+async fn detect_all_async(history: Arc<QqLoginHistory>) -> Result<Vec<LocalQqIdentity>, String> {
+    tokio::task::spawn_blocking(move || detect_all(&history))
         .await
         .map_err(|error| format!("QQ 身份检测任务异常结束: {error}"))?
 }
@@ -82,21 +87,25 @@ fn confirm_stable_identities(
     }
     for identity in &mut second {
         identity.source = "qq_ui_stable_visible_accounts";
-        identity.verification_detail = "QQ 主界面昵称 + login.enc 匹配 + 连续两次一致";
+        identity.verification_detail = "QQ 主界面昵称 + 本机登录记录匹配 + 连续两次一致";
     }
     Ok(second)
 }
 
-fn detect_all_from_qq_root(qq_root: &Path) -> Result<Vec<LocalQqIdentity>, String> {
+fn detect_all_from_qq_root(
+    qq_root: &Path,
+    history: &QqLoginHistory,
+) -> Result<Vec<LocalQqIdentity>, String> {
     let visible_nicknames = crate::qq_window::visible_nicknames()?;
     let path = qq_root.join("auth").join("login.enc");
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("读取 Windows QQ 登录信息失败: {error}"))?;
     let entries = parse_login_entries(content.trim_start_matches('\u{feff}'))?;
+    let entries = history.remember_and_merge(entries);
     resolve_identities(entries, &visible_nicknames)
 }
 
-fn parse_login_entries(content: &str) -> Result<Vec<LoginEntry>, String> {
+fn parse_login_entries(content: &str) -> Result<Vec<ObservedQqAccount>, String> {
     let data: Value =
         serde_json::from_str(content).map_err(|_| "Windows QQ 登录信息格式无法识别".to_owned())?;
     // 不同版本的 Windows QQ 写出的 login.enc 结构不同：顶层直接是账号数组，或包在 {"loginList": [...]} 里。
@@ -125,7 +134,7 @@ fn parse_login_entries(content: &str) -> Result<Vec<LoginEntry>, String> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .trim();
-            Some(LoginEntry {
+            Some(ObservedQqAccount {
                 avatar_url: if is_safe_avatar_url(face_url) {
                     face_url.to_owned()
                 } else {
@@ -143,7 +152,7 @@ fn parse_login_entries(content: &str) -> Result<Vec<LoginEntry>, String> {
 }
 
 fn resolve_identities(
-    entries: Vec<LoginEntry>,
+    entries: Vec<ObservedQqAccount>,
     visible_nicknames: &[String],
 ) -> Result<Vec<LocalQqIdentity>, String> {
     let visible_nicknames = visible_nicknames
@@ -163,12 +172,12 @@ fn resolve_identities(
             nickname: entry.nickname,
             avatar_url: entry.avatar_url,
             source: "qq_ui_visible_account",
-            verification_detail: "QQ 主界面昵称 + login.enc 匹配",
+            verification_detail: "QQ 主界面昵称 + 本机登录记录匹配",
         })
         .collect::<Vec<_>>();
     if identities.is_empty() {
         return Err(format!(
-            "QQ 主界面显示的账号（{}）均未在登录列表中找到，本次不会自动绑定 QQ 号",
+            "QQ 主界面显示的账号（{}）均未在本机登录记录中找到，请用该账号重新登录一次 QQ；本次不会自动绑定 QQ 号",
             visible_nicknames.into_iter().collect::<Vec<_>>().join("、")
         ));
     }
@@ -199,8 +208,22 @@ fn qq_avatar_url(qq_number: &str) -> String {
 mod tests {
     use super::*;
 
-    fn entries(content: &str) -> Vec<LoginEntry> {
+    fn entries(content: &str) -> Vec<ObservedQqAccount> {
         parse_login_entries(content).unwrap()
+    }
+
+    fn temp_history() -> (PathBuf, QqLoginHistory) {
+        let directory = std::env::temp_dir().join(format!(
+            "qq-farm-code-helper-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let history = QqLoginHistory::new(directory.clone());
+        (directory, history)
     }
 
     #[test]
@@ -280,7 +303,29 @@ mod tests {
             ),
             &["另一个账号".to_owned()],
         );
-        assert!(result.unwrap_err().contains("均未在登录列表中找到"));
+        assert!(result.unwrap_err().contains("均未在本机登录记录中找到"));
+    }
+
+    #[test]
+    fn offers_the_remembered_account_when_the_login_file_only_keeps_the_latest() {
+        let (directory, history) = temp_history();
+        history.remember_and_merge(entries(
+            r#"[{"uin":"1343475483","nickName":"芜","faceUrl":"","isUserLogin":true}]"#,
+        ));
+
+        let merged = history.remember_and_merge(entries(
+            r#"[{"uin":"3170105001","nickName":"落","faceUrl":"","isUserLogin":true}]"#,
+        ));
+        let identities = resolve_identities(merged, &["芜".to_owned(), "落".to_owned()]).unwrap();
+
+        assert_eq!(
+            identities
+                .iter()
+                .map(|identity| identity.qq_number.as_str())
+                .collect::<Vec<_>>(),
+            vec!["3170105001", "1343475483"]
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -343,7 +388,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a running Windows QQ main window and local login.enc"]
     async fn detects_the_live_windows_qq_identities() {
-        let identities = detect_stable_all_async().await.unwrap();
+        let (directory, history) = temp_history();
+        let identities = detect_stable_all_async(Arc::new(history)).await.unwrap();
         eprintln!("live QQ account count: {}", identities.len());
         assert!(!identities.is_empty());
         assert!(
@@ -351,5 +397,6 @@ mod tests {
                 .iter()
                 .all(|identity| !identity.qq_number.is_empty())
         );
+        fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -76,8 +76,10 @@ pub async fn get_captured_code(core: State<'_, Arc<AppCore>>) -> Result<String, 
 }
 
 #[tauri::command]
-pub async fn detect_local_qqs() -> Result<Vec<LocalQqIdentity>, String> {
-    qq_identity::detect_stable_all_async().await
+pub async fn detect_local_qqs(
+    core: State<'_, Arc<AppCore>>,
+) -> Result<Vec<LocalQqIdentity>, String> {
+    qq_identity::detect_stable_all_async(core.login_history()).await
 }
 
 #[tauri::command]
@@ -90,7 +92,8 @@ pub async fn select_local_qq(
     if qq_number.is_empty() {
         return Err("请选择本次登录的 QQ 账号".to_owned());
     }
-    let identity = qq_identity::detect_selected_stable_async(qq_number).await?;
+    let identity =
+        qq_identity::detect_selected_stable_async(core.login_history(), qq_number).await?;
     core.select_local_qq(&app, identity).await
 }
 
