@@ -10,6 +10,12 @@ const elements = {
   detectQqButton: document.querySelector('#detectQqButton'),
   inlineMessage: document.querySelector('#inlineMessage'),
   installUpdateButton: document.querySelector('#installUpdateButton'),
+  privacyNote: document.querySelector('#privacyNote'),
+  profileCard: document.querySelector('#profileCard'),
+  protocolCapture: document.querySelector('#protocolCapture'),
+  protocolField: document.querySelector('#protocolField'),
+  protocolFlow: document.querySelector('#protocolFlow'),
+  protocolModeNotice: document.querySelector('#protocolModeNotice'),
   proxyPort: document.querySelector('#proxyPort'),
   qqNumber: document.querySelector('#qqNumber'),
   profileAccountPicker: document.querySelector('#profileAccountPicker'),
@@ -25,6 +31,7 @@ const elements = {
   saveButton: document.querySelector('#saveButton'),
   serverToken: document.querySelector('#serverToken'),
   serverUrl: document.querySelector('#serverUrl'),
+  settingsCard: document.querySelector('#settingsCard'),
   stageList: [...document.querySelectorAll('#stageList li')],
   startButton: document.querySelector('#startButton'),
   startButtonText: document.querySelector('#startButtonText'),
@@ -53,6 +60,7 @@ const activePhases = new Set([
   'waiting_login',
   'code_captured',
   'syncing',
+  'protocol_listening',
 ])
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
 const identityPollInterval = 2000
@@ -162,6 +170,7 @@ function settingsPayload() {
       auto_sync: elements.autoSync.checked,
       sync_official_friends: elements.syncOfficialFriends.checked,
       proxy_port: Number(elements.proxyPort.value),
+      protocol_capture: elements.protocolCapture.checked,
       update_proxy: elements.updateProxy.checked,
     },
     token: elements.serverToken.value.trim() || null,
@@ -284,6 +293,7 @@ function fillSettings(data) {
   elements.autoSync.checked = data.settings.auto_sync !== false
   elements.syncOfficialFriends.checked = data.settings.sync_official_friends !== false
   elements.proxyPort.value = data.settings.proxy_port || 8899
+  elements.protocolCapture.checked = data.settings.protocol_capture === true
   elements.updateProxy.checked = data.settings.update_proxy !== false
   syncUpdateProxyHint()
   elements.tokenHint.textContent = data.token_configured
@@ -292,26 +302,42 @@ function fillSettings(data) {
   syncTaskUi()
 }
 
+function syncModePresentation() {
+  const protocolMode = elements.protocolCapture.checked
+  const listening = currentPhase === 'protocol_listening'
+  elements.settingsCard.classList.toggle('protocol-enabled', protocolMode)
+  elements.profileCard.classList.toggle('protocol-enabled', protocolMode)
+  elements.protocolField.classList.toggle('active', protocolMode)
+  elements.protocolModeNotice.classList.toggle('hidden', !protocolMode)
+  elements.stageList[0]?.parentElement.classList.toggle('hidden', protocolMode)
+  elements.protocolFlow.classList.toggle('hidden', !protocolMode)
+  elements.protocolFlow.classList.toggle('listening', listening)
+  elements.privacyNote.textContent = protocolMode
+    ? '协议模式只在本机保存完整网关消息，不提取或上传 Code；停止后自动恢复系统代理并移除临时证书。'
+    : 'Code 与官方好友 GID 只在任务期间保存在内存中；结束后自动恢复系统代理并移除临时证书。'
+}
+
 function syncTaskUi() {
   const isActive = activePhases.has(currentPhase) || startPending
+  const protocolMode = elements.protocolCapture.checked
   for (const element of [
     elements.accountName,
     elements.autoSync,
     elements.syncOfficialFriends,
-    elements.saveButton,
     elements.serverToken,
     elements.serverUrl,
     elements.testButton,
     elements.toggleToken,
-    elements.proxyPort,
   ])
+    element.disabled = isActive || protocolMode
+  for (const element of [elements.protocolCapture, elements.proxyPort, elements.saveButton])
     element.disabled = isActive
-  const canChooseQq = !startPending && (!isActive || currentPhase === 'waiting_login')
+  const canChooseQq = !protocolMode && !startPending && (!isActive || currentPhase === 'waiting_login')
   elements.detectQqButton.disabled = !canChooseQq || identitySelectionPending
   elements.qqNumber.disabled = !canChooseQq
     || identitySelectionPending
     || currentIdentityCandidates.length === 0
-  elements.syncOfficialFriends.disabled = isActive || !elements.autoSync.checked
+  elements.syncOfficialFriends.disabled = isActive || protocolMode || !elements.autoSync.checked
   elements.startButton.disabled = isActive
   elements.stopButton.disabled = !isActive
     || currentPhase === 'preparing_proxy'
@@ -319,8 +345,13 @@ function syncTaskUi() {
   elements.cleanupButton.disabled = startPending
     || stopPending
     || currentPhase === 'preparing_proxy'
-  const codeActive = ['preparing_proxy', 'waiting_login', 'code_captured', 'syncing'].includes(currentPhase)
-  elements.startButtonText.textContent = codeActive ? '正在获取…' : '启动获取'
+  if (protocolMode)
+    elements.startButtonText.textContent = isActive ? '正在监听…' : '启动协议监听'
+  else {
+    const codeActive = ['preparing_proxy', 'waiting_login', 'code_captured', 'syncing'].includes(currentPhase)
+    elements.startButtonText.textContent = codeActive ? '正在获取…' : '启动获取'
+  }
+  syncModePresentation()
 }
 
 function syncUpdateProxyHint() {
@@ -512,7 +543,22 @@ function renderUnconfirmedIdentity(error) {
   clearProfileAvatar()
 }
 
+function renderProtocolAccount() {
+  elements.profileState.textContent = '仅限本机'
+  elements.profileState.classList.add('ready')
+  elements.profileName.textContent = '协议审查模式'
+  elements.profileIdentity.textContent = '无需绑定服务器账号'
+  elements.profileGid.textContent = '不读取'
+  elements.profileOpenId.textContent = '不读取'
+  elements.profileNote.textContent = '登录握手只透明转发给官方网关；Helper 不提取 Code，服务器同步链路不会启动。'
+  clearProfileAvatar()
+}
+
 function renderAccountCard() {
+  if (elements.protocolCapture.checked) {
+    renderProtocolAccount()
+    return
+  }
   if (!hasIdentityResult) {
     renderPendingIdentity()
     return
@@ -553,6 +599,7 @@ function showStatusToast(status) {
   const config = {
     code_captured: { type: 'success', duration: 6500 },
     syncing: { type: 'info', duration: 5200 },
+    protocol_listening: { type: 'success', duration: 8000 },
     completed: { type: 'success', duration: 6000 },
     stopped: { type: 'info', duration: 4200 },
     identity_changed: { type: 'warning', duration: 9000 },
@@ -597,7 +644,10 @@ async function saveSettings() {
     const result = await invoke('save_settings', settingsPayload())
     fillSettings(result)
     elements.serverToken.value = ''
-    showMessage('服务器地址、同步选项、更新下载方式和本地设置均已更新。', { type: 'success', title: '设置已保存' })
+    const message = elements.protocolCapture.checked
+      ? '协议模式与本地代理端口已保存；启动时不会校验服务器或上传 Code。'
+      : '服务器地址、同步选项、更新下载方式和本地设置均已更新。'
+    showMessage(message, { type: 'success', title: '设置已保存' })
   }
   catch (error) {
     showMessage(String(error), { type: 'error', title: '保存设置失败' })
@@ -639,7 +689,8 @@ async function startCapture() {
     dismissToast('identity-unavailable')
   }
   catch (error) {
-    showMessage(String(error), { type: 'error', title: '无法启动获取', duration: 10000 })
+    const title = elements.protocolCapture.checked ? '无法启动协议监听' : '无法启动获取'
+    showMessage(String(error), { type: 'error', title, duration: 10000 })
   }
   finally {
     startPending = false
@@ -882,7 +933,7 @@ async function bootstrap() {
   fillSettings(data)
   renderStatus(data.status)
   const initialIdentity = await detectLocalQq({ notify: false })
-  if (!initialIdentity) {
+  if (!initialIdentity && !elements.protocolCapture.checked) {
     showMessage(`${currentIdentityError || '尚未检测到 Windows QQ。'} 你仍可先点击“启动获取”启动代理，随后再登录 QQ。`, {
       type: 'warning',
       toast: false,
@@ -905,6 +956,11 @@ elements.detectQqButton.addEventListener('click', () => detectLocalQq())
 elements.installUpdateButton.addEventListener('click', installUpdate)
 elements.updateProxy.addEventListener('change', saveUpdateProxyPreference)
 elements.autoSync.addEventListener('change', syncTaskUi)
+elements.protocolCapture.addEventListener('change', () => {
+  syncTaskUi()
+  renderAccountCard()
+  showMessage('')
+})
 elements.toggleToken.addEventListener('click', () => {
   const hidden = elements.serverToken.type === 'password'
   elements.serverToken.type = hidden ? 'text' : 'password'

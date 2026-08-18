@@ -1,6 +1,7 @@
 use crate::{
     certificates::{TARGET_HOST, upstream_client_config},
     friend_proxy,
+    protocol_capture::{self, ProtocolCaptureSession},
 };
 use rustls::{ClientConfig, ServerConfig};
 use std::{
@@ -32,6 +33,9 @@ pub enum ProxyMode {
         capture_friend_gids: bool,
         diagnostics_path: Option<PathBuf>,
     },
+    ProtocolCapture {
+        session: Arc<ProtocolCaptureSession>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +61,8 @@ pub async fn run(
         ProxyMode::CaptureCode {
             capture_friend_gids: true,
             ..
-        } => Some(upstream_client_config()),
+        }
+        | ProxyMode::ProtocolCapture { .. } => Some(upstream_client_config()),
         _ => None,
     };
     let mut connections = JoinSet::new();
@@ -166,6 +171,11 @@ async fn intercept_target(
                 friend_capture_warning,
             });
             Ok(())
+        }
+        ProxyMode::ProtocolCapture { session } => {
+            let upstream_tls =
+                upstream_tls.ok_or_else(|| "协议监听缺少上游 TLS 配置".to_owned())?;
+            protocol_capture::relay_target_websocket(tls, headers, upstream_tls, session).await
         }
     }
 }

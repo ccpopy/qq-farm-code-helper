@@ -33,10 +33,22 @@ pub(crate) struct FriendCaptureOutcome {
 }
 
 pub(crate) async fn relay_target_websocket<S>(
-    mut client: S,
+    client: S,
     request_headers: Vec<u8>,
     upstream_tls: Arc<ClientConfig>,
 ) -> Result<FriendCaptureOutcome, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (client, upstream) = open_target_websocket(client, request_headers, upstream_tls).await?;
+    relay_websocket(client, upstream).await
+}
+
+pub(crate) async fn open_target_websocket<S>(
+    mut client: S,
+    request_headers: Vec<u8>,
+    upstream_tls: Arc<ClientConfig>,
+) -> Result<(S, tokio_rustls::client::TlsStream<TcpStream>), String>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -66,7 +78,7 @@ where
         return Err(format!("QQ 农场网关拒绝 WebSocket 登录 (HTTP {status})"));
     }
 
-    relay_websocket(client, upstream).await
+    Ok((client, upstream))
 }
 
 async fn connect_target_tls(

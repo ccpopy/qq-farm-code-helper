@@ -62,6 +62,13 @@
               </li>
             </ol>
 
+            <div class="protocol-flow hidden" id="protocolFlow" aria-label="协议模式流程">
+              <div><span>01</span><strong>透明转发</strong><small>官方连接</small></div>
+              <div><span>02</span><strong>双向监听</strong><small>完整消息</small></div>
+              <div><span>03</span><strong>顺序归档</strong><small>仅限本机</small></div>
+              <div><span>04</span><strong>手动停止</strong><small>保留会话</small></div>
+            </div>
+
             <div class="action-row">
               <button class="primary-action" id="startButton" type="button" disabled>
                 <span class="button-dot"></span>
@@ -117,7 +124,7 @@
           </aside>
         </div>
 
-        <section class="card settings-card reveal reveal-4">
+        <section class="card settings-card reveal reveal-4" id="settingsCard">
           <div class="section-heading">
             <div>
               <p class="section-label">SERVER SYNC</p>
@@ -162,6 +169,27 @@
               <span>本地代理端口</span>
               <input id="proxyPort" type="number" min="1024" max="65535" value="8899">
             </label>
+
+            <label class="protocol-field" id="protocolField">
+              <span class="protocol-field-copy">
+                <span class="protocol-field-title">协议模式 <em>LOCAL</em></span>
+                <small>持续监听并归档网关消息</small>
+              </span>
+              <span class="protocol-toggle">
+                <input id="protocolCapture" type="checkbox">
+                <i></i>
+              </span>
+            </label>
+          </div>
+
+          <div class="protocol-mode-notice hidden" id="protocolModeNotice" role="note">
+            <span class="protocol-mode-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 7h5l2-3 2 3h7"/><path d="M4 17h5l2 3 2-3h7"/><path d="M7 7v10M17 7v10"/></svg>
+            </span>
+            <div>
+              <strong>本地协议审查会话</strong>
+              <p>开启后忽略服务器同步设置，透明转发官方连接并持续保存双向二进制消息，直到手动停止。不会提取、保存或上传登录 Code；抓包可能包含账号与农场数据，请妥善保管。</p>
+            </div>
           </div>
 
           <div class="settings-actions">

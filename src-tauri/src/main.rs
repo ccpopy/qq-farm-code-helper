@@ -5,6 +5,7 @@ mod certificates;
 mod commands;
 mod friend_capture;
 mod friend_proxy;
+mod protocol_capture;
 mod proxy;
 mod qq_identity;
 mod qq_login_history;

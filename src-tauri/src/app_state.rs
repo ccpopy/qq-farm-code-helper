@@ -1,5 +1,6 @@
 use crate::{
     certificates::CertificateManager,
+    protocol_capture::{CaptureSummary, ProtocolCaptureSession},
     proxy::{self, ProxyMode},
     qq_identity::{self, LocalQqIdentity},
     qq_login_history::QqLoginHistory,
@@ -9,7 +10,7 @@ use crate::{
     system_proxy::SystemProxyManager,
 };
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -35,6 +36,7 @@ struct RuntimeState {
     selected_qq_number: Option<String>,
     locked_identity: Option<LocalQqIdentity>,
     identity_warning: Option<String>,
+    protocol_session: Option<Arc<ProtocolCaptureSession>>,
     status: StatusPayload,
 }
 
@@ -50,6 +52,7 @@ impl Default for RuntimeState {
             selected_qq_number: None,
             locked_identity: None,
             identity_warning: None,
+            protocol_session: None,
             status: StatusPayload::idle(),
         }
     }
@@ -59,6 +62,7 @@ pub struct AppCore {
     certificates: CertificateManager,
     diagnostics_path: PathBuf,
     network_recovery: Mutex<()>,
+    protocol_capture_root: PathBuf,
     proxy_manager: SystemProxyManager,
     qq_login_history: Arc<QqLoginHistory>,
     settings: SettingsStore,
@@ -74,6 +78,7 @@ impl AppCore {
             certificates: CertificateManager::new(data_dir.clone()),
             diagnostics_path: data_dir.join("traffic-diagnostics.log"),
             network_recovery: Mutex::new(()),
+            protocol_capture_root: data_dir.join("protocol-captures"),
             proxy_manager: SystemProxyManager::new(data_dir.clone()),
             qq_login_history: Arc::new(QqLoginHistory::new(data_dir.clone())),
             settings: SettingsStore::new(data_dir),
@@ -131,29 +136,25 @@ impl AppCore {
 
     async fn start_capture_inner(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
         let settings = self.settings.load()?;
+        if settings.protocol_capture {
+            return self.start_protocol_capture(app, settings).await;
+        }
         self.validate_sync_settings(&settings)?;
-        self.publish(
-            &app,
-            StatusPayload::new(
-                "preparing_proxy",
-                "正在启动代理",
-                "生成临时证书并保存当前系统代理设置…",
-                false,
-            ),
-        )
-        .await;
+        self.start_code_capture(app, settings).await
+    }
 
-        let tls = match self.prepare_certificate().await {
-            Ok(tls) => tls,
-            Err(error) => return Err(self.record_failure(&app, error, false).await),
-        };
-        let listener = match proxy::bind(settings.proxy_port).await {
-            Ok(listener) => listener,
-            Err(error) => {
-                let _ = self.cleanup_certificate().await;
-                return Err(self.record_failure(&app, error, false).await);
-            }
-        };
+    async fn start_code_capture(
+        self: &Arc<Self>,
+        app: AppHandle,
+        settings: AppSettings,
+    ) -> Result<(), String> {
+        let (tls, listener) = self
+            .prepare_proxy_listener(
+                &app,
+                settings.proxy_port,
+                "生成临时证书并保存当前系统代理设置…",
+            )
+            .await?;
         let cancellation = CancellationToken::new();
         let identity_cancellation = cancellation.clone();
         let (sender, receiver) = mpsc::channel(1);
@@ -193,35 +194,122 @@ impl AppCore {
         Ok(())
     }
 
-    pub async fn stop_capture(&self, app: &AppHandle) -> Result<(), String> {
-        self.stop_transport().await?;
-        self.clear_capture_identity().await;
+    async fn start_protocol_capture(
+        self: &Arc<Self>,
+        app: AppHandle,
+        settings: AppSettings,
+    ) -> Result<(), String> {
+        let (tls, listener) = self
+            .prepare_proxy_listener(
+                &app,
+                settings.proxy_port,
+                "准备本地协议归档目录，并保存当前系统代理设置…",
+            )
+            .await?;
+        let session = match ProtocolCaptureSession::create(&self.protocol_capture_root) {
+            Ok(session) => session,
+            Err(error) => {
+                let _ = self.cleanup_certificate().await;
+                return Err(self.record_failure(&app, error, false).await);
+            }
+        };
+        let cancellation = CancellationToken::new();
+        let mode = ProxyMode::ProtocolCapture {
+            session: session.clone(),
+        };
+        let task = tokio::spawn(proxy::run(listener, tls, cancellation.clone(), mode));
+        self.store_protocol_transport(cancellation, task, session.clone())
+            .await;
+
+        if let Err(error) = self.enable_system_proxy(settings.proxy_port).await {
+            let _ = self.stop_transport().await;
+            self.take_protocol_session().await;
+            return Err(self.record_failure(&app, error, false).await);
+        }
         self.publish(
-            app,
+            &app,
             StatusPayload::new(
-                "stopped",
-                "已停止",
-                "系统代理和临时证书已恢复。",
-                self.has_code().await,
+                "protocol_listening",
+                "协议监听中",
+                protocol_listening_detail(session.directory()),
+                false,
             ),
         )
         .await;
         Ok(())
     }
 
-    pub async fn cleanup_network(&self, app: &AppHandle) -> Result<(), String> {
-        self.stop_transport().await?;
-        self.clear_capture_identity().await;
+    async fn prepare_proxy_listener(
+        &self,
+        app: &AppHandle,
+        proxy_port: u16,
+        detail: &str,
+    ) -> Result<(Arc<rustls::ServerConfig>, tokio::net::TcpListener), String> {
         self.publish(
             app,
+            StatusPayload::new("preparing_proxy", "正在启动代理", detail, false),
+        )
+        .await;
+
+        let tls = match self.prepare_certificate().await {
+            Ok(tls) => tls,
+            Err(error) => return Err(self.record_failure(app, error, false).await),
+        };
+        let listener = match proxy::bind(proxy_port).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                let _ = self.cleanup_certificate().await;
+                return Err(self.record_failure(app, error, false).await);
+            }
+        };
+        Ok((tls, listener))
+    }
+
+    pub async fn stop_capture(&self, app: &AppHandle) -> Result<(), String> {
+        let protocol_session = self.take_protocol_session().await;
+        self.stop_transport().await?;
+        self.clear_capture_identity().await;
+        let status = if let Some(session) = protocol_session {
+            let summary = session.summary();
+            StatusPayload::new(
+                "stopped",
+                "协议监听已停止",
+                protocol_capture_completion_detail(&summary, "系统代理和临时证书已恢复"),
+                false,
+            )
+        } else {
+            StatusPayload::new(
+                "stopped",
+                "已停止",
+                "系统代理和临时证书已恢复。",
+                self.has_code().await,
+            )
+        };
+        self.publish(app, status).await;
+        Ok(())
+    }
+
+    pub async fn cleanup_network(&self, app: &AppHandle) -> Result<(), String> {
+        let protocol_session = self.take_protocol_session().await;
+        self.stop_transport().await?;
+        self.clear_capture_identity().await;
+        let status = if let Some(session) = protocol_session {
+            let summary = session.summary();
+            StatusPayload::new(
+                "idle",
+                "协议监听已清理",
+                protocol_capture_completion_detail(&summary, "系统代理与临时证书均已清理"),
+                false,
+            )
+        } else {
             StatusPayload::new(
                 "idle",
                 "清理完成",
                 "系统代理与临时证书均已清理。",
                 self.has_code().await,
-            ),
-        )
-        .await;
+            )
+        };
+        self.publish(app, status).await;
         Ok(())
     }
 
@@ -593,6 +681,29 @@ impl AppCore {
         runtime.selected_qq_number = selected_qq_number;
         runtime.locked_identity = locked_identity;
         runtime.identity_warning = identity_warning;
+        runtime.protocol_session = None;
+    }
+
+    async fn store_protocol_transport(
+        &self,
+        cancellation: CancellationToken,
+        task: JoinHandle<()>,
+        session: Arc<ProtocolCaptureSession>,
+    ) {
+        let mut runtime = self.runtime.lock().await;
+        runtime.cancellation = Some(cancellation);
+        runtime.task = Some(task);
+        runtime.capture_task = None;
+        runtime.identity_task = None;
+        runtime.last_code = None;
+        runtime.selected_qq_number = None;
+        runtime.locked_identity = None;
+        runtime.identity_warning = None;
+        runtime.protocol_session = Some(session);
+    }
+
+    async fn take_protocol_session(&self) -> Option<Arc<ProtocolCaptureSession>> {
+        self.runtime.lock().await.protocol_session.take()
     }
 
     async fn stop_transport(&self) -> Result<(), String> {
@@ -840,6 +951,34 @@ fn waiting_login_detail(auto_sync: bool, sync_official_friends: bool) -> &'stati
         "本地代理已启动。现在可以打开或登录 Windows QQ；检测并锁定当前账号后，再进入 QQ 农场。未确认账号前捕获到 Code 也不会提交服务器。"
     } else {
         "本地代理已启动。现在可以打开或登录 Windows QQ，再进入 QQ 农场；自动同步已关闭，本次只获取 Code。"
+    }
+}
+
+fn protocol_listening_detail(directory: &Path) -> String {
+    format!(
+        "本地协议代理正在持续监听。请进入 QQ 农场并操作需要审查的活动；完整双向消息只保存到 {}，不会提取或上传 Code。完成后请手动停止。",
+        directory.display()
+    )
+}
+
+fn protocol_capture_completion_detail(summary: &CaptureSummary, network_result: &str) -> String {
+    format!(
+        "{network_result}；已按收发顺序保存 {} 条消息（{}）到 {}。抓包文件会保留，便于后续协议解码与活动验证。",
+        summary.message_count,
+        readable_bytes(summary.total_bytes),
+        summary.directory.display()
+    )
+}
+
+fn readable_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    if bytes >= MIB {
+        format!("{:.2} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
     }
 }
 

@@ -15,6 +15,7 @@ pub struct AppSettings {
     pub auto_sync: bool,
     pub sync_official_friends: bool,
     pub proxy_port: u16,
+    pub protocol_capture: bool,
     pub update_proxy: bool,
 }
 
@@ -27,6 +28,7 @@ impl Default for AppSettings {
             auto_sync: true,
             sync_official_friends: true,
             proxy_port: 8899,
+            protocol_capture: false,
             update_proxy: true,
         }
     }
@@ -185,6 +187,11 @@ mod tests {
     }
 
     #[test]
+    fn keeps_protocol_capture_disabled_by_default() {
+        assert!(!AppSettings::default().protocol_capture);
+    }
+
+    #[test]
     fn old_settings_files_enable_the_release_download_proxy() {
         let settings: AppSettings = serde_json::from_str(
             r#"{"server_url":"","account_name":"Windows QQ","qq_number":"","auto_sync":true,"proxy_port":8899}"#,
@@ -193,6 +200,7 @@ mod tests {
 
         assert!(settings.update_proxy);
         assert!(settings.sync_official_friends);
+        assert!(!settings.protocol_capture);
     }
 
     #[test]
