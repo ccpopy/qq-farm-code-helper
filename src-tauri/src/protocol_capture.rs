@@ -1,4 +1,4 @@
-use crate::friend_proxy::open_target_websocket;
+use crate::friend_proxy::{open_target_websocket, target_websocket_url};
 use rustls::ClientConfig;
 use serde::Serialize;
 use std::{
@@ -10,7 +10,8 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-const CAPTURE_FORMAT_VERSION: u8 = 1;
+const CAPTURE_FORMAT_VERSION: u8 = 2;
+const HANDSHAKE_DIRECTORY: &str = "handshakes";
 const MAX_FRAME_PAYLOAD: usize = 64 * 1024 * 1024;
 const MAX_MESSAGE_PAYLOAD: usize = 64 * 1024 * 1024;
 
@@ -44,6 +45,7 @@ impl CaptureDirection {
 #[derive(Debug, Clone)]
 pub(crate) struct CaptureSummary {
     pub directory: PathBuf,
+    pub connection_count: u64,
     pub message_count: u64,
     pub total_bytes: u64,
 }
@@ -55,6 +57,8 @@ pub(crate) struct ProtocolCaptureSession {
 
 struct CaptureWriter {
     manifest: File,
+    connections: File,
+    connection_count: u64,
     message_count: u64,
     total_bytes: u64,
 }
@@ -68,8 +72,18 @@ struct SessionMetadata {
 }
 
 #[derive(Serialize)]
+struct ConnectionRecord<'a> {
+    connection_id: u64,
+    timestamp_ms: u128,
+    url_file: &'a str,
+    size: usize,
+    contains_code: bool,
+}
+
+#[derive(Serialize)]
 struct ManifestRecord<'a> {
     sequence: u64,
+    connection_id: u64,
     timestamp_ms: u128,
     direction: CaptureDirection,
     file: &'a str,
@@ -82,11 +96,13 @@ impl ProtocolCaptureSession {
             .map_err(|error| format!("创建协议抓包根目录失败: {error}"))?;
         let started_at_ms = unix_timestamp_ms();
         let directory = create_unique_session_directory(capture_root, started_at_ms)?;
+        fs::create_dir(directory.join(HANDSHAKE_DIRECTORY))
+            .map_err(|error| format!("创建协议握手目录失败: {error}"))?;
         let metadata = SessionMetadata {
             format_version: CAPTURE_FORMAT_VERSION,
             started_at_ms,
-            content: "完整的 QQ 农场 WebSocket 二进制消息（已去除帧封装）",
-            privacy: "不保存 HTTP/WebSocket 握手头、登录 URL 或 Code",
+            content: "每条连接的完整 QQ 农场 WebSocket 握手 URL，以及已去除帧封装的双向二进制消息",
+            privacy: "握手 URL 以明文保存并包含一次性登录 Code；会话仅保存在本机，不会上传",
         };
         let metadata_bytes = serde_json::to_vec_pretty(&metadata)
             .map_err(|error| format!("生成协议抓包会话信息失败: {error}"))?;
@@ -97,11 +113,18 @@ impl ProtocolCaptureSession {
             .append(true)
             .open(directory.join("manifest.jsonl"))
             .map_err(|error| format!("创建协议抓包清单失败: {error}"))?;
+        let connections = OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(directory.join("connections.jsonl"))
+            .map_err(|error| format!("创建协议连接清单失败: {error}"))?;
 
         Ok(Arc::new(Self {
             directory,
             writer: Mutex::new(CaptureWriter {
                 manifest,
+                connections,
+                connection_count: 0,
                 message_count: 0,
                 total_bytes: 0,
             }),
@@ -119,16 +142,61 @@ impl ProtocolCaptureSession {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         CaptureSummary {
             directory: self.directory.clone(),
+            connection_count: writer.connection_count,
             message_count: writer.message_count,
             total_bytes: writer.total_bytes,
         }
     }
 
-    fn store_message(&self, direction: CaptureDirection, payload: &[u8]) -> Result<(), String> {
+    fn store_handshake_url(&self, url: &str) -> Result<u64, String> {
         let mut writer = self
             .writer
             .lock()
             .map_err(|_| "协议抓包写入器状态异常".to_owned())?;
+        let connection_id = writer.connection_count + 1;
+        let file_name = format!("connection-{connection_id:06}-url.txt");
+        let relative_path = format!("{HANDSHAKE_DIRECTORY}/{file_name}");
+        let handshake_directory = self.directory.join(HANDSHAKE_DIRECTORY);
+        let final_path = handshake_directory.join(&file_name);
+        let temporary_path = handshake_directory.join(format!(".{file_name}.part"));
+        fs::write(&temporary_path, url.as_bytes())
+            .map_err(|error| format!("写入握手 URL 临时文件失败: {error}"))?;
+        if let Err(error) = fs::rename(&temporary_path, &final_path) {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(format!("提交握手 URL 文件失败: {error}"));
+        }
+
+        let record = ConnectionRecord {
+            connection_id,
+            timestamp_ms: unix_timestamp_ms(),
+            url_file: &relative_path,
+            size: url.len(),
+            contains_code: true,
+        };
+        serde_json::to_writer(&mut writer.connections, &record)
+            .map_err(|error| format!("写入协议连接清单失败: {error}"))?;
+        writer
+            .connections
+            .write_all(b"\n")
+            .and_then(|_| writer.connections.flush())
+            .map_err(|error| format!("刷新协议连接清单失败: {error}"))?;
+        writer.connection_count = connection_id;
+        Ok(connection_id)
+    }
+
+    fn store_message(
+        &self,
+        connection_id: u64,
+        direction: CaptureDirection,
+        payload: &[u8],
+    ) -> Result<(), String> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| "协议抓包写入器状态异常".to_owned())?;
+        if connection_id == 0 || connection_id > writer.connection_count {
+            return Err(format!("协议消息引用了无效连接编号: {connection_id}"));
+        }
         let sequence = writer.message_count + 1;
         let file_name = format!("{sequence:06}-{}.bin", direction.file_label());
         let final_path = self.directory.join(&file_name);
@@ -142,6 +210,7 @@ impl ProtocolCaptureSession {
 
         let record = ManifestRecord {
             sequence,
+            connection_id,
             timestamp_ms: unix_timestamp_ms(),
             direction,
             file: &file_name,
@@ -169,6 +238,8 @@ pub(crate) async fn relay_target_websocket<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let handshake_url = target_websocket_url(&request_headers)?;
+    let connection_id = session.store_handshake_url(&handshake_url)?;
     let (client, upstream) = open_target_websocket(client, request_headers, upstream_tls).await?;
     let (client_reader, client_writer) = tokio::io::split(client);
     let (upstream_reader, upstream_writer) = tokio::io::split(upstream);
@@ -177,12 +248,14 @@ where
         relay_direction(
             client_reader,
             upstream_writer,
+            connection_id,
             CaptureDirection::ClientToServer,
             session.clone(),
         ),
         relay_direction(
             upstream_reader,
             client_writer,
+            connection_id,
             CaptureDirection::ServerToClient,
             session,
         ),
@@ -193,6 +266,7 @@ where
 async fn relay_direction<R, W>(
     mut reader: R,
     mut writer: W,
+    connection_id: u64,
     direction: CaptureDirection,
     session: Arc<ProtocolCaptureSession>,
 ) -> Result<(), String>
@@ -217,7 +291,7 @@ where
             .await
             .map_err(|error| format!("转发{}协议流量失败: {error}", direction.description()))?;
         for payload in inspector.feed(&buffer[..read])? {
-            session.store_message(direction, &payload)?;
+            session.store_message(connection_id, direction, &payload)?;
         }
     }
 }
@@ -511,21 +585,34 @@ mod tests {
     }
 
     #[test]
-    fn stores_globally_ordered_binary_files_without_login_headers() {
+    fn stores_full_handshake_urls_and_associates_messages_with_connections() {
         let root = std::env::temp_dir().join(format!(
             "qq-farm-protocol-capture-{}-{}",
             std::process::id(),
             unix_timestamp_ms()
         ));
         let session = ProtocolCaptureSession::create(&root).unwrap();
+        let first_url = "wss://gate-obt.nqf.qq.com/prod/ws?platform=qq&code=first-synthetic-code";
+        let second_url = "wss://gate-obt.nqf.qq.com/prod/ws?platform=qq&code=second-synthetic-code";
+        let first_connection = session.store_handshake_url(first_url).unwrap();
+        let second_connection = session.store_handshake_url(second_url).unwrap();
         session
-            .store_message(CaptureDirection::ClientToServer, b"request")
+            .store_message(
+                first_connection,
+                CaptureDirection::ClientToServer,
+                b"request",
+            )
             .unwrap();
         session
-            .store_message(CaptureDirection::ServerToClient, b"reply")
+            .store_message(
+                second_connection,
+                CaptureDirection::ServerToClient,
+                b"reply",
+            )
             .unwrap();
 
         let summary = session.summary();
+        assert_eq!(summary.connection_count, 2);
         assert_eq!(summary.message_count, 2);
         assert_eq!(summary.total_bytes, 12);
         assert_eq!(
@@ -536,10 +623,34 @@ mod tests {
             fs::read(summary.directory.join("000002-recv.bin")).unwrap(),
             b"reply"
         );
+        assert_eq!(
+            fs::read_to_string(
+                summary
+                    .directory
+                    .join("handshakes/connection-000001-url.txt")
+            )
+            .unwrap(),
+            first_url
+        );
+        assert_eq!(
+            fs::read_to_string(
+                summary
+                    .directory
+                    .join("handshakes/connection-000002-url.txt")
+            )
+            .unwrap(),
+            second_url
+        );
         let session_metadata = fs::read_to_string(summary.directory.join("session.json")).unwrap();
+        let connections = fs::read_to_string(summary.directory.join("connections.jsonl")).unwrap();
         let manifest = fs::read_to_string(summary.directory.join("manifest.jsonl")).unwrap();
-        assert!(!session_metadata.to_ascii_lowercase().contains("code="));
-        assert!(!manifest.to_ascii_lowercase().contains("code="));
+        assert!(session_metadata.contains("握手 URL"));
+        assert!(session_metadata.contains("包含一次性登录 Code"));
+        assert!(connections.contains("handshakes/connection-000001-url.txt"));
+        assert!(connections.contains("\"connection_id\":1"));
+        assert!(connections.contains("\"connection_id\":2"));
+        assert!(manifest.contains("\"connection_id\":1"));
+        assert!(manifest.contains("\"connection_id\":2"));
         assert!(manifest.contains("client_to_server"));
         assert!(manifest.contains("server_to_client"));
 

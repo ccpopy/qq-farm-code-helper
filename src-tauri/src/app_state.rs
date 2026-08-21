@@ -956,14 +956,15 @@ fn waiting_login_detail(auto_sync: bool, sync_official_friends: bool) -> &'stati
 
 fn protocol_listening_detail(directory: &Path) -> String {
     format!(
-        "本地协议代理正在持续监听。请进入 QQ 农场并操作需要审查的活动；完整双向消息只保存到 {}，不会提取或上传 Code。完成后请手动停止。",
+        "本地协议代理正在持续监听。请进入 QQ 农场并操作需要审查的活动；每条连接的完整握手 URL（含 Code）与双向消息只保存到 {}，不会上传。完成后请手动停止。",
         directory.display()
     )
 }
 
 fn protocol_capture_completion_detail(summary: &CaptureSummary, network_result: &str) -> String {
     format!(
-        "{network_result}；已按收发顺序保存 {} 条消息（{}）到 {}。抓包文件会保留，便于后续协议解码与活动验证。",
+        "{network_result}；已保存 {} 条连接的完整握手 URL（含 Code），并按收发顺序保存 {} 条消息（{}）到 {}。抓包文件会保留，便于严格比较、协议解码与活动验证。",
+        summary.connection_count,
         summary.message_count,
         readable_bytes(summary.total_bytes),
         summary.directory.display()

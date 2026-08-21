@@ -313,7 +313,7 @@ function syncModePresentation() {
   elements.protocolFlow.classList.toggle('hidden', !protocolMode)
   elements.protocolFlow.classList.toggle('listening', listening)
   elements.privacyNote.textContent = protocolMode
-    ? '协议模式只在本机保存完整网关消息，不提取或上传 Code；停止后自动恢复系统代理并移除临时证书。'
+    ? '协议模式只在本机保存完整握手 URL（含 Code）与网关消息，不会上传；停止后自动恢复系统代理并移除临时证书。'
     : 'Code 与官方好友 GID 只在任务期间保存在内存中；结束后自动恢复系统代理并移除临时证书。'
 }
 
@@ -550,7 +550,7 @@ function renderProtocolAccount() {
   elements.profileIdentity.textContent = '无需绑定服务器账号'
   elements.profileGid.textContent = '不读取'
   elements.profileOpenId.textContent = '不读取'
-  elements.profileNote.textContent = '登录握手只透明转发给官方网关；Helper 不提取 Code，服务器同步链路不会启动。'
+  elements.profileNote.textContent = '完整登录握手 URL（含 Code）会写入本机会话目录供严格比较；不会上传，服务器同步链路不会启动。'
   clearProfileAvatar()
 }
 
@@ -645,7 +645,7 @@ async function saveSettings() {
     fillSettings(result)
     elements.serverToken.value = ''
     const message = elements.protocolCapture.checked
-      ? '协议模式与本地代理端口已保存；启动时不会校验服务器或上传 Code。'
+      ? '协议模式与本地代理端口已保存；启动时会把完整握手 URL（含 Code）写入本机，但不会上传。'
       : '服务器地址、同步选项、更新下载方式和本地设置均已更新。'
     showMessage(message, { type: 'success', title: '设置已保存' })
   }

@@ -81,6 +81,19 @@ where
     Ok((client, upstream))
 }
 
+pub(crate) fn target_websocket_url(headers: &[u8]) -> Result<String, String> {
+    validate_target_websocket_request(headers)?;
+    let text =
+        std::str::from_utf8(headers).map_err(|_| "QQ WebSocket 请求头不是有效 UTF-8".to_owned())?;
+    let target = text
+        .split("\r\n")
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or_else(|| "QQ WebSocket 请求目标缺失".to_owned())?;
+    let host = header_value(text, "host").ok_or_else(|| "QQ WebSocket Host 缺失".to_owned())?;
+    Ok(format!("wss://{host}{target}"))
+}
+
 async fn connect_target_tls(
     config: Arc<ClientConfig>,
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, String> {
@@ -543,6 +556,18 @@ mod tests {
         assert_eq!(rewritten.matches("Host:").count(), 1);
         assert!(rewritten.contains(&format!("Host: {TARGET_HOST}\r\n")));
         assert!(rewritten.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn preserves_the_complete_websocket_url_for_strict_comparison() {
+        let headers = format!(
+            "GET /prod/ws?platform=qq&code={TEST_CODE}&device=Windows HTTP/1.1\r\nHost: {TARGET_HOST}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+
+        assert_eq!(
+            target_websocket_url(headers.as_bytes()).unwrap(),
+            format!("wss://{TARGET_HOST}/prod/ws?platform=qq&code={TEST_CODE}&device=Windows")
+        );
     }
 
     #[test]
