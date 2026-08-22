@@ -5,6 +5,7 @@ const MAX_FRAME_PAYLOAD: usize = 8 * 1024 * 1024;
 const MAX_BUFFERED_BYTES: usize = MAX_FRAME_PAYLOAD + 16 * 1024 + 32;
 const MAX_FRIEND_GIDS: usize = 500;
 const FRIEND_SERVICE: &str = "gamepb.friendpb.FriendService";
+const USER_SERVICE: &str = "gamepb.userpb.UserService";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FriendReplyKind {
@@ -22,6 +23,7 @@ pub(crate) struct CapturedFriendReply {
 #[derive(Debug, Default)]
 pub(crate) struct ServerInspection {
     pub latest_server_seq: i64,
+    pub own_gid: Option<String>,
     pub friend_replies: Vec<CapturedFriendReply>,
 }
 
@@ -69,6 +71,9 @@ impl ServerFriendInspector {
                     if let Some(message) = self.process_frame(frame) {
                         inspection.latest_server_seq =
                             inspection.latest_server_seq.max(message.server_seq.max(0));
+                        if inspection.own_gid.is_none() {
+                            inspection.own_gid = message.own_gid;
+                        }
                         if let Some(friend_reply) = message.friend_reply {
                             inspection.friend_replies.push(friend_reply);
                         }
@@ -269,8 +274,21 @@ struct SyncAllRequest {
     open_ids: Vec<String>,
 }
 
+#[derive(Clone, PartialEq, Message)]
+struct LoginReply {
+    #[prost(message, optional, tag = "1")]
+    basic: Option<BasicInfo>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct BasicInfo {
+    #[prost(int64, tag = "1")]
+    gid: i64,
+}
+
 struct MessageInspection {
     server_seq: i64,
+    own_gid: Option<String>,
     friend_reply: Option<CapturedFriendReply>,
 }
 
@@ -278,20 +296,36 @@ fn inspect_server_message(bytes: &[u8]) -> MessageInspection {
     let Ok(envelope) = GateEnvelope::decode(bytes) else {
         return MessageInspection {
             server_seq: 0,
+            own_gid: None,
             friend_reply: None,
         };
     };
     let Some(meta) = envelope.meta else {
         return MessageInspection {
             server_seq: 0,
+            own_gid: None,
             friend_reply: None,
         };
     };
+    let own_gid = extract_own_gid(&meta, &envelope.body);
     let friend_reply = extract_friend_reply(&meta, &envelope.body);
     MessageInspection {
         server_seq: meta.server_seq,
+        own_gid,
         friend_reply,
     }
+}
+
+fn extract_own_gid(meta: &GateMeta, body: &[u8]) -> Option<String> {
+    if meta.service_name != USER_SERVICE
+        || meta.method_name != "Login"
+        || meta.message_type != 2
+        || meta.error_code != 0
+    {
+        return None;
+    }
+    let gid = LoginReply::decode(body).ok()?.basic?.gid;
+    (gid > 0).then(|| gid.to_string())
 }
 
 fn extract_friend_reply(meta: &GateMeta, body: &[u8]) -> Option<CapturedFriendReply> {
@@ -367,6 +401,24 @@ mod tests {
         name: String,
     }
 
+    #[derive(Clone, PartialEq, Message)]
+    struct FullLoginReply {
+        #[prost(message, optional, tag = "1")]
+        basic: Option<FullBasicInfo>,
+        #[prost(int64, tag = "3")]
+        time_now_millis: i64,
+    }
+
+    #[derive(Clone, PartialEq, Message)]
+    struct FullBasicInfo {
+        #[prost(int64, tag = "1")]
+        gid: i64,
+        #[prost(string, tag = "2")]
+        name: String,
+        #[prost(string, tag = "6")]
+        open_id: String,
+    }
+
     fn friend_message(method_name: &str, gids: &[i64], error_code: i64) -> Vec<u8> {
         let reply = FullFriendListReply {
             game_friends: gids
@@ -386,6 +438,32 @@ mod tests {
                 message_type: 2,
                 client_seq: 17,
                 server_seq: 29,
+                error_code,
+                error_message: String::new(),
+                metadata: HashMap::new(),
+            }),
+            body: reply.encode_to_vec(),
+            token: String::new(),
+        }
+        .encode_to_vec()
+    }
+
+    fn login_message(gid: i64, error_code: i64) -> Vec<u8> {
+        let reply = FullLoginReply {
+            basic: Some(FullBasicInfo {
+                gid,
+                name: "测试农夫".to_owned(),
+                open_id: "private-open-id".to_owned(),
+            }),
+            time_now_millis: 1_700_000_000_000,
+        };
+        GateEnvelope {
+            meta: Some(GateMeta {
+                service_name: USER_SERVICE.to_owned(),
+                method_name: "Login".to_owned(),
+                message_type: 2,
+                client_seq: 11,
+                server_seq: 13,
                 error_code,
                 error_message: String::new(),
                 metadata: HashMap::new(),
@@ -431,6 +509,29 @@ mod tests {
                 gids: vec!["10001".to_owned(), "10002".to_owned()],
             }]
         );
+    }
+
+    #[test]
+    fn extracts_own_gid_from_the_successful_login_reply() {
+        let frame = binary_frame(&login_message(1_027_000_001, 0));
+        let split = frame.len() / 2;
+        let mut inspector = ServerFriendInspector::new();
+
+        assert_eq!(inspector.feed(&frame[..split]).own_gid, None);
+        let inspection = inspector.feed(&frame[split..]);
+
+        assert_eq!(inspection.own_gid.as_deref(), Some("1027000001"));
+        assert_eq!(inspection.latest_server_seq, 13);
+        assert!(inspection.friend_replies.is_empty());
+    }
+
+    #[test]
+    fn ignores_own_gid_from_failed_or_invalid_login_replies() {
+        assert_eq!(
+            inspect_server_message(&login_message(1_027_000_001, 1001)).own_gid,
+            None
+        );
+        assert_eq!(inspect_server_message(&login_message(0, 0)).own_gid, None);
     }
 
     #[test]

@@ -464,7 +464,10 @@ impl AppCore {
             .sync_code(settings, &captured.code, &locked_identity)
             .await;
         match result {
-            Ok(profile) => {
+            Ok(mut profile) => {
+                if let Some(own_gid) = captured_own_gid(captured) {
+                    profile.gid = own_gid.to_owned();
+                }
                 self.set_code(None).await;
                 let mut detail = sync_completion_detail(&profile, &locked_identity);
                 if settings.sync_official_friends {
@@ -502,10 +505,9 @@ impl AppCore {
             return format!("\n好友未同步：{warning}");
         }
 
-        let own_gid = profile.gid.trim();
-        if own_gid.is_empty() {
-            return "\n好友未同步：远程账号缺少 GID".to_owned();
-        }
+        let Some(own_gid) = captured_own_gid(captured) else {
+            return "\n好友未同步：官方登录回包缺少自身 GID".to_owned();
+        };
 
         let friend_gids = friend_gids_without_self(&captured.friend_gids, own_gid);
         let excluded_count = captured.friend_gids.len() - friend_gids.len();
@@ -1005,6 +1007,15 @@ fn friend_gids_without_self(captured_gids: &[String], own_gid: &str) -> Vec<Stri
         .collect()
 }
 
+fn captured_own_gid(captured: &proxy::CapturedLogin) -> Option<&str> {
+    let gid = captured.own_gid.as_deref()?.trim();
+    (!gid.is_empty()
+        && gid.len() <= 19
+        && gid.bytes().all(|byte| byte.is_ascii_digit())
+        && gid.bytes().any(|byte| byte != b'0'))
+    .then_some(gid)
+}
+
 fn sync_completion_detail(
     profile: &crate::server_sync::AccountProfile,
     locked_identity: &LocalQqIdentity,
@@ -1153,6 +1164,37 @@ mod tests {
         let filtered = friend_gids_without_self(&captured, "10002");
 
         assert_eq!(filtered, vec!["10001".to_owned(), "10003".to_owned()]);
+    }
+
+    #[test]
+    fn official_own_gid_comes_from_the_captured_login_reply() {
+        let captured = proxy::CapturedLogin {
+            code: "test-code".to_owned(),
+            own_gid: Some(" 1027000001 ".to_owned()),
+            friend_gids: vec!["10001".to_owned()],
+            friend_capture_warning: None,
+        };
+
+        assert_eq!(captured_own_gid(&captured), Some("1027000001"));
+    }
+
+    #[test]
+    fn invalid_captured_own_gids_are_rejected() {
+        for own_gid in [
+            None,
+            Some(String::new()),
+            Some("0".to_owned()),
+            Some("12ab".to_owned()),
+        ] {
+            let captured = proxy::CapturedLogin {
+                code: "test-code".to_owned(),
+                own_gid,
+                friend_gids: Vec::new(),
+                friend_capture_warning: None,
+            };
+
+            assert_eq!(captured_own_gid(&captured), None);
+        }
     }
 
     #[test]

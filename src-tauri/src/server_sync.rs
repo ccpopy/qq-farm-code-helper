@@ -190,7 +190,7 @@ impl ServerClient {
             .await?;
 
         for _ in 0..30 {
-            if profile.running && profile.has_game_identity() {
+            if profile.running {
                 break;
             }
             sleep(Duration::from_millis(500)).await;

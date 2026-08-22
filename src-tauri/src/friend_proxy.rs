@@ -9,7 +9,7 @@ use rustls::ClientConfig;
 use std::{
     collections::HashSet,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicI64, Ordering},
     },
     time::Duration,
@@ -28,6 +28,7 @@ const ACTIVE_CAPTURE_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FriendCaptureOutcome {
+    pub own_gid: Option<String>,
     pub gids: Vec<String>,
     pub warning: Option<String>,
 }
@@ -143,6 +144,7 @@ where
     let (injection_sender, injection_receiver) = mpsc::channel(1);
     let (reply_sender, mut reply_receiver) = mpsc::channel(16);
     let latest_server_seq = Arc::new(AtomicI64::new(0));
+    let own_gid = Arc::new(OnceLock::new());
     let client_to_server =
         relay_client_websocket(client_reader, upstream_writer, injection_receiver);
     let server_to_client = relay_server_websocket(
@@ -150,6 +152,7 @@ where
         client_writer,
         reply_sender,
         latest_server_seq.clone(),
+        own_gid.clone(),
     );
     tokio::pin!(client_to_server, server_to_client);
 
@@ -160,17 +163,17 @@ where
     loop {
         tokio::select! {
             result = &mut client_to_server => {
-                return transport_ended("QQ 客户端到官方网关", result, fallback_gids);
+                return transport_ended("QQ 客户端到官方网关", result, fallback_gids, own_gid.get().cloned());
             }
             result = &mut server_to_client => {
-                return transport_ended("官方网关到 QQ 客户端", result, fallback_gids);
+                return transport_ended("官方网关到 QQ 客户端", result, fallback_gids, own_gid.get().cloned());
             }
             reply = reply_receiver.recv() => {
                 let Some(reply) = reply else {
                     return Err("官方好友响应捕获通道已关闭".to_owned());
                 };
                 if reply.kind == FriendReplyKind::SyncAll && !reply.gids.is_empty() {
-                    return Ok(FriendCaptureOutcome { gids: reply.gids, warning: None });
+                    return Ok(capture_outcome(&own_gid, reply.gids, None));
                 }
                 merge_gids(&mut fallback_gids, &mut fallback_seen, &reply.gids);
             }
@@ -179,12 +182,11 @@ where
     }
 
     if !fallback_gids.is_empty() {
-        return Ok(FriendCaptureOutcome {
-            gids: fallback_gids,
-            warning: Some(
-                "QQ 客户端未返回 SyncAll，已采用官方 GetGameFriends 响应中的 GID".to_owned(),
-            ),
-        });
+        return Ok(capture_outcome(
+            &own_gid,
+            fallback_gids,
+            Some("QQ 客户端未返回 SyncAll，已采用官方 GetGameFriends 响应中的 GID".to_owned()),
+        ));
     }
 
     let server_seq = latest_server_seq.load(Ordering::Relaxed);
@@ -199,10 +201,10 @@ where
     loop {
         tokio::select! {
             result = &mut client_to_server => {
-                return transport_ended("QQ 客户端到官方网关", result, fallback_gids);
+                return transport_ended("QQ 客户端到官方网关", result, fallback_gids, own_gid.get().cloned());
             }
             result = &mut server_to_client => {
-                return transport_ended("官方网关到 QQ 客户端", result, fallback_gids);
+                return transport_ended("官方网关到 QQ 客户端", result, fallback_gids, own_gid.get().cloned());
             }
             reply = reply_receiver.recv() => {
                 let Some(reply) = reply else {
@@ -214,39 +216,54 @@ where
                             "QQ 客户端未主动触发 SyncAll，已由 Helper 通过当前官方会话发起"
                                 .to_owned()
                         });
-                        return Ok(FriendCaptureOutcome { gids: reply.gids, warning });
+                        return Ok(capture_outcome(&own_gid, reply.gids, warning));
                     }
                     if reply.client_seq == active_client_seq {
-                        return Ok(FriendCaptureOutcome {
-                            gids: Vec::new(),
-                            warning: Some(
+                        return Ok(capture_outcome(
+                            &own_gid,
+                            Vec::new(),
+                            Some(
                                 "QQ 客户端未主动触发 SyncAll；Helper 主动请求成功，但官方返回 0 位好友"
                                     .to_owned(),
                             ),
-                        });
+                        ));
                     }
                 }
                 merge_gids(&mut fallback_gids, &mut fallback_seen, &reply.gids);
             }
             _ = &mut active_wait => {
                 if fallback_gids.is_empty() {
-                    return Ok(FriendCaptureOutcome {
-                        gids: Vec::new(),
-                        warning: Some(
+                    return Ok(capture_outcome(
+                        &own_gid,
+                        Vec::new(),
+                        Some(
                             "QQ 客户端未主动触发 SyncAll，Helper 主动请求后仍未收到可识别的官方好友响应"
                                 .to_owned(),
                         ),
-                    });
+                    ));
                 }
-                return Ok(FriendCaptureOutcome {
-                    gids: fallback_gids,
-                    warning: Some(
+                return Ok(capture_outcome(
+                    &own_gid,
+                    fallback_gids,
+                    Some(
                         "主动 SyncAll 未返回好友，已采用官方 GetGameFriends 响应中的 GID"
                             .to_owned(),
                     ),
-                });
+                ));
             }
         }
+    }
+}
+
+fn capture_outcome(
+    own_gid: &OnceLock<String>,
+    gids: Vec<String>,
+    warning: Option<String>,
+) -> FriendCaptureOutcome {
+    FriendCaptureOutcome {
+        own_gid: own_gid.get().cloned(),
+        gids,
+        warning,
     }
 }
 
@@ -254,9 +271,11 @@ fn transport_ended(
     direction: &str,
     result: Result<(), String>,
     fallback_gids: Vec<String>,
+    own_gid: Option<String>,
 ) -> Result<FriendCaptureOutcome, String> {
     if !fallback_gids.is_empty() {
         return Ok(FriendCaptureOutcome {
+            own_gid,
             gids: fallback_gids,
             warning: Some(format!(
                 "{direction}连接提前结束，已采用此前官方响应中的部分好友 GID"
@@ -319,6 +338,7 @@ async fn relay_server_websocket<R, W>(
     mut writer: W,
     replies: mpsc::Sender<CapturedFriendReply>,
     latest_server_seq: Arc<AtomicI64>,
+    own_gid: Arc<OnceLock<String>>,
 ) -> Result<(), String>
 where
     R: AsyncRead + Unpin,
@@ -340,6 +360,9 @@ where
             .await
             .map_err(|error| format!("转发 QQ WebSocket 响应失败: {error}"))?;
         let inspection = inspector.feed(&buffer[..read]);
+        if let Some(captured_own_gid) = inspection.own_gid {
+            let _ = own_gid.set(captured_own_gid);
+        }
         if inspection.latest_server_seq > latest_server_seq.load(Ordering::Relaxed) {
             latest_server_seq.store(inspection.latest_server_seq, Ordering::Relaxed);
         }

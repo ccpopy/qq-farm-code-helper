@@ -41,6 +41,7 @@ pub enum ProxyMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedLogin {
     pub code: String,
+    pub own_gid: Option<String>,
     pub friend_gids: Vec<String>,
     pub friend_capture_warning: Option<String>,
 }
@@ -152,6 +153,7 @@ async fn intercept_target(
             if !capture_friend_gids {
                 let _ = captured.try_send(CapturedLogin {
                     code,
+                    own_gid: None,
                     friend_gids: Vec::new(),
                     friend_capture_warning: None,
                 });
@@ -160,13 +162,14 @@ async fn intercept_target(
 
             let upstream_tls =
                 upstream_tls.ok_or_else(|| "官方透明登录缺少上游 TLS 配置".to_owned())?;
-            let (friend_gids, friend_capture_warning) =
+            let (own_gid, friend_gids, friend_capture_warning) =
                 match friend_proxy::relay_target_websocket(tls, headers, upstream_tls).await {
-                    Ok(outcome) => (outcome.gids, outcome.warning),
-                    Err(error) => (Vec::new(), Some(error)),
+                    Ok(outcome) => (outcome.own_gid, outcome.gids, outcome.warning),
+                    Err(error) => (None, Vec::new(), Some(error)),
                 };
             let _ = captured.try_send(CapturedLogin {
                 code,
+                own_gid,
                 friend_gids,
                 friend_capture_warning,
             });

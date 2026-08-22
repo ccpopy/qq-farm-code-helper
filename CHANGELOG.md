@@ -1,5 +1,18 @@
 # 更新日志
 
+## v0.2.3
+
+### 好友同步读取本次登录的自身 GID
+
+- Helper 直接从本次官方 `UserService.Login` 成功回包的 `basic.gid` 读取自身 GID，不再等待远程账号回填 GID 或 OpenID。
+- 好友同步使用本次登录的自身 GID 排除自己，并清理远程好友缓存中可能残留的自身 GID；远程账号缺少 GID 时不再中断好友同步。
+- 远程账号启动后即可继续同步，不再为等待游戏身份额外轮询。
+
+### 验证
+
+- 本地真实登录抓包中的多次成功回包均确认自身 GID 位于 `LoginReply.basic.gid`。
+- 通过登录回包解析、WebSocket 分帧、非法 GID 拒绝和自身过滤测试，并通过 rustfmt、Clippy 严格检查及 Windows Release 构建。
+
 ## v0.2.2
 
 ### 可严格比较的登录握手归档
