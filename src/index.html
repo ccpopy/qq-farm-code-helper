@@ -22,9 +22,9 @@
       <div class="brand-copy">
         <p class="eyebrow">QQ FARM LOCAL TOOL</p>
         <h1>Code 获取助手</h1>
-        <p class="brand-subtitle">在 Windows QQ 内安全获取农场登录 Code</p>
+        <p class="brand-subtitle">从 Windows QQ 获取农场登录 Code</p>
       </div>
-      <span class="version-chip" id="versionChip">v0.1.5</span>
+      <button class="version-chip" id="versionChip" type="button" aria-label="应用版本">v0.2.2</button>
     </div>
   </header>
 
@@ -37,8 +37,8 @@
               <div class="status-signal" id="statusSignal"><span></span></div>
               <div class="status-copy">
                 <p class="section-label">当前状态</p>
-                <h2 id="statusTitle">尚未启动</h2>
-                <p id="statusDetail">保存服务器设置后，启动一次性本地代理。</p>
+                <h2 id="statusTitle">待启动</h2>
+                <p id="statusDetail">点击“启动获取”，再打开 QQ 农场。</p>
               </div>
               <span class="status-code" id="statusCode">IDLE</span>
             </div>
@@ -46,27 +46,27 @@
             <ol class="stage-list" id="stageList">
               <li data-stage="preparing_proxy">
                 <span class="stage-index">01</span>
-                <span><strong>启动代理</strong><small>临时证书</small></span>
+                <span><strong>启动代理</strong><small>端口 <b id="stageProxyPort">8899</b></small></span>
               </li>
               <li data-stage="waiting_login">
                 <span class="stage-index">02</span>
-                <span><strong>等待登录</strong><small>打开农场</small></span>
+                <span><strong>打开农场</strong><small>等待登录</small></span>
               </li>
               <li data-stage="code_captured">
                 <span class="stage-index">03</span>
-                <span><strong>获取登录数据</strong><small>Code 与好友</small></span>
+                <span><strong>获取 Code</strong><small>Code 与好友</small></span>
               </li>
               <li data-stage="syncing">
                 <span class="stage-index">04</span>
-                <span><strong>同步服务器</strong><small>启动并刷新好友</small></span>
+                <span><strong>同步账号</strong><small>自动启动</small></span>
               </li>
             </ol>
 
             <div class="protocol-flow hidden" id="protocolFlow" aria-label="协议模式流程">
-              <div><span>01</span><strong>透明转发</strong><small>官方连接</small></div>
-              <div><span>02</span><strong>双向监听</strong><small>完整消息</small></div>
-              <div><span>03</span><strong>顺序归档</strong><small>仅限本机</small></div>
-              <div><span>04</span><strong>手动停止</strong><small>保留会话</small></div>
+              <div><span>01</span><strong>代理端口</strong><small id="protocolFlowPort">8899</small></div>
+              <div><span>02</span><strong>监听连接</strong><small>QQ 农场</small></div>
+              <div><span>03</span><strong>写入日志</strong><small>会话目录</small></div>
+              <div><span>04</span><strong>停止</strong><small>恢复网络</small></div>
             </div>
 
             <div class="action-row">
@@ -116,11 +116,11 @@
                 </div>
               </div>
             </div>
-            <dl class="profile-meta">
+            <dl class="profile-meta" id="profileMeta">
               <div><dt>农场 GID</dt><dd id="profileGid">—</dd></div>
               <div><dt>OpenID</dt><dd id="profileOpenId">—</dd></div>
             </dl>
-            <p class="profile-note" id="profileNote">正在确认当前 Windows QQ；Code 流量本身不包含真实 QQ 号。</p>
+            <p class="profile-note" id="profileNote">正在确认 Windows QQ。</p>
           </aside>
         </div>
 
@@ -144,7 +144,7 @@
             </div>
           </div>
 
-          <div class="form-grid">
+          <div class="form-grid protocol-locked" id="settingsForm">
             <label class="field field-wide">
               <span>服务器地址</span>
               <input id="serverUrl" type="url" placeholder="https://farm.example.com" autocomplete="url">
@@ -170,7 +170,7 @@
               <input id="proxyPort" type="number" min="1024" max="65535" value="8899">
             </label>
 
-            <label class="protocol-field" id="protocolField">
+            <label class="protocol-field hidden" id="protocolField">
               <span class="protocol-field-copy">
                 <span class="protocol-field-title">协议模式 <em>LOCAL</em></span>
                 <small>持续监听并归档网关消息</small>
@@ -187,8 +187,8 @@
               <svg viewBox="0 0 24 24"><path d="M4 7h5l2-3 2 3h7"/><path d="M4 17h5l2 3 2-3h7"/><path d="M7 7v10M17 7v10"/></svg>
             </span>
             <div>
-              <strong>本地协议审查会话</strong>
-              <p>开启后忽略服务器同步设置，透明转发官方连接，并保存每条连接的完整握手 URL（含 Code）及双向二进制消息，直到手动停止。所有资料仅保存在本机且不会上传；它们包含登录凭据与账号、农场数据，请严格保管。</p>
+              <strong>协议模式</strong>
+              <p>启动后显示代理端口和日志目录。</p>
             </div>
           </div>
 
@@ -207,7 +207,7 @@
                 <p class="section-label">APP UPDATE</p>
                 <h2 id="updateHeading">应用更新</h2>
               </div>
-              <span class="update-version" id="updateVersion">v0.1.5</span>
+              <span class="update-version" id="updateVersion">v0.2.2</span>
             </div>
             <p class="update-status" id="updateStatus" aria-live="polite">启动后自动检查 GitHub Release，也可以手动检查。</p>
             <p class="update-target" id="updateTarget">更新会保留当前程序所在目录。</p>
@@ -229,7 +229,7 @@
 
         <footer class="privacy-note reveal reveal-4">
           <span>●</span>
-          <p id="privacyNote">Code 与官方好友 GID 只在任务期间保存在内存中；结束后自动恢复系统代理并移除临时证书。</p>
+          <p id="privacyNote">结束任务后自动恢复网络。</p>
         </footer>
       </main>
     </div>

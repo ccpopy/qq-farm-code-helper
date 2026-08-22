@@ -15,6 +15,7 @@ const elements = {
   protocolCapture: document.querySelector('#protocolCapture'),
   protocolField: document.querySelector('#protocolField'),
   protocolFlow: document.querySelector('#protocolFlow'),
+  protocolFlowPort: document.querySelector('#protocolFlowPort'),
   protocolModeNotice: document.querySelector('#protocolModeNotice'),
   proxyPort: document.querySelector('#proxyPort'),
   qqNumber: document.querySelector('#qqNumber'),
@@ -23,6 +24,7 @@ const elements = {
   profileFallback: document.querySelector('#profileFallback'),
   profileGid: document.querySelector('#profileGid'),
   profileIdentity: document.querySelector('#profileIdentity'),
+  profileMeta: document.querySelector('#profileMeta'),
   profileName: document.querySelector('#profileName'),
   profileNote: document.querySelector('#profileNote'),
   profileOpenId: document.querySelector('#profileOpenId'),
@@ -31,8 +33,10 @@ const elements = {
   saveButton: document.querySelector('#saveButton'),
   serverToken: document.querySelector('#serverToken'),
   serverUrl: document.querySelector('#serverUrl'),
+  settingsForm: document.querySelector('#settingsForm'),
   settingsCard: document.querySelector('#settingsCard'),
   stageList: [...document.querySelectorAll('#stageList li')],
+  stageProxyPort: document.querySelector('#stageProxyPort'),
   startButton: document.querySelector('#startButton'),
   startButtonText: document.querySelector('#startButtonText'),
   statusCode: document.querySelector('#statusCode'),
@@ -64,6 +68,7 @@ const activePhases = new Set([
 ])
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
 const identityPollInterval = 2000
+const protocolUnlockTarget = 5
 
 let currentPhase = 'idle'
 let currentIdentityCandidates = []
@@ -75,6 +80,9 @@ let identityRequest = null
 let identitySelectionPending = false
 let latestUpdate = null
 let preferredQqNumber = ''
+let protocolModeUnlocked = false
+let protocolUnlockClicks = 0
+let savedProtocolCapture = false
 let startPending = false
 let stopPending = false
 let toastSequence = 0
@@ -161,6 +169,10 @@ function setupScrollArea() {
 
 const scrollArea = setupScrollArea()
 
+function isProtocolMode() {
+  return protocolModeUnlocked && elements.protocolCapture.checked
+}
+
 function settingsPayload() {
   return {
     settings: {
@@ -170,7 +182,7 @@ function settingsPayload() {
       auto_sync: elements.autoSync.checked,
       sync_official_friends: elements.syncOfficialFriends.checked,
       proxy_port: Number(elements.proxyPort.value),
-      protocol_capture: elements.protocolCapture.checked,
+      protocol_capture: isProtocolMode(),
       update_proxy: elements.updateProxy.checked,
     },
     token: elements.serverToken.value.trim() || null,
@@ -293,8 +305,11 @@ function fillSettings(data) {
   elements.autoSync.checked = data.settings.auto_sync !== false
   elements.syncOfficialFriends.checked = data.settings.sync_official_friends !== false
   elements.proxyPort.value = data.settings.proxy_port || 8899
-  elements.protocolCapture.checked = data.settings.protocol_capture === true
+  elements.stageProxyPort.textContent = String(elements.proxyPort.value)
+  savedProtocolCapture = data.settings.protocol_capture === true
+  elements.protocolCapture.checked = protocolModeUnlocked && savedProtocolCapture
   elements.updateProxy.checked = data.settings.update_proxy !== false
+  syncDeveloperControls()
   syncUpdateProxyHint()
   elements.tokenHint.textContent = data.token_configured
     ? 'Token 已安全保存在 Windows 凭据管理器；留空即保留。'
@@ -302,8 +317,44 @@ function fillSettings(data) {
   syncTaskUi()
 }
 
+function syncDeveloperControls() {
+  elements.protocolField.classList.toggle('hidden', !protocolModeUnlocked)
+  elements.settingsForm.classList.toggle('protocol-locked', !protocolModeUnlocked)
+  elements.versionChip.classList.toggle('developer-unlocked', protocolModeUnlocked)
+  elements.versionChip.setAttribute('aria-pressed', String(protocolModeUnlocked))
+}
+
+function handleVersionChipClick() {
+  if (protocolModeUnlocked)
+    return
+
+  protocolUnlockClicks += 1
+  const remaining = protocolUnlockTarget - protocolUnlockClicks
+  if (remaining > 0) {
+    showToast(`再点击 ${remaining} 次显示协议模式`, {
+      type: 'info',
+      title: '开发者设置',
+      duration: 2600,
+      id: 'protocol-unlock',
+    })
+    return
+  }
+
+  protocolModeUnlocked = true
+  elements.protocolCapture.checked = savedProtocolCapture
+  syncDeveloperControls()
+  syncTaskUi()
+  renderAccountCard()
+  showToast('协议模式已显示', {
+    type: 'success',
+    title: '开发者设置',
+    duration: 4200,
+    id: 'protocol-unlock',
+  })
+}
+
 function syncModePresentation() {
-  const protocolMode = elements.protocolCapture.checked
+  const protocolMode = isProtocolMode()
   const listening = currentPhase === 'protocol_listening'
   elements.settingsCard.classList.toggle('protocol-enabled', protocolMode)
   elements.profileCard.classList.toggle('protocol-enabled', protocolMode)
@@ -312,14 +363,15 @@ function syncModePresentation() {
   elements.stageList[0]?.parentElement.classList.toggle('hidden', protocolMode)
   elements.protocolFlow.classList.toggle('hidden', !protocolMode)
   elements.protocolFlow.classList.toggle('listening', listening)
+  elements.protocolFlowPort.textContent = String(elements.proxyPort.value || 8899)
   elements.privacyNote.textContent = protocolMode
-    ? '协议模式只在本机保存完整握手 URL（含 Code）与网关消息，不会上传；停止后自动恢复系统代理并移除临时证书。'
-    : 'Code 与官方好友 GID 只在任务期间保存在内存中；结束后自动恢复系统代理并移除临时证书。'
+    ? '协议日志目录：启动后显示'
+    : '结束任务后自动恢复网络。'
 }
 
 function syncTaskUi() {
   const isActive = activePhases.has(currentPhase) || startPending
-  const protocolMode = elements.protocolCapture.checked
+  const protocolMode = isProtocolMode()
   for (const element of [
     elements.accountName,
     elements.autoSync,
@@ -485,7 +537,7 @@ function renderProfile(profile) {
   elements.profileOpenId.textContent = profile.openId
     ? `${profile.openId.slice(0, 8)}${profile.openId.length > 8 ? '…' : ''}`
     : '等待登录回填'
-  elements.profileNote.textContent = '昵称、GID 与头像来自远程登录结果；Code 流量本身不包含真实 QQ 号。'
+  elements.profileNote.textContent = '远程账号已同步。'
   setProfileAvatar(profile.avatarUrl)
 }
 
@@ -513,8 +565,8 @@ function renderLocalIdentity(identity) {
   elements.profileIdentity.textContent = `QQ ${identity.qqNumber}`
   elements.profileGid.textContent = '同步后回填'
   elements.profileOpenId.textContent = '同步后回填'
-  const switchHint = currentIdentityCandidates.length > 1 ? '；可在账号下拉框切换其他账号' : ''
-  elements.profileNote.textContent = `已锁定“${identity.nickname || '未命名'}”（QQ ${identity.qqNumber}）${switchHint}，捕获后会再次复核。`
+  const switchHint = currentIdentityCandidates.length > 1 ? '，可在列表切换' : ''
+  elements.profileNote.textContent = `QQ ${identity.qqNumber} 已确认${switchHint}。`
   setProfileAvatar(identity.avatarUrl)
 }
 
@@ -522,11 +574,11 @@ function renderPendingIdentity() {
   elements.qqNumber.value = ''
   elements.profileState.textContent = '正在确认'
   elements.profileState.classList.remove('ready')
-  elements.profileName.textContent = '正在读取当前 Windows QQ'
-  elements.profileIdentity.textContent = '不会沿用上一次的账号'
+  elements.profileName.textContent = '正在读取 Windows QQ'
+  elements.profileIdentity.textContent = '等待确认'
   elements.profileGid.textContent = '—'
   elements.profileOpenId.textContent = '—'
-  elements.profileNote.textContent = '请保持新版 QQ 主窗口打开，检测完成前不会绑定 QQ 号。'
+  elements.profileNote.textContent = '请保持 QQ 主窗口打开。'
   clearProfileAvatar()
 }
 
@@ -544,18 +596,20 @@ function renderUnconfirmedIdentity(error) {
 }
 
 function renderProtocolAccount() {
-  elements.profileState.textContent = '仅限本机'
+  elements.profileState.textContent = '开发者'
   elements.profileState.classList.add('ready')
-  elements.profileName.textContent = '协议审查模式'
-  elements.profileIdentity.textContent = '无需绑定服务器账号'
+  elements.profileName.textContent = '协议模式'
+  elements.profileIdentity.textContent = `代理端口 ${elements.proxyPort.value || 8899}`
   elements.profileGid.textContent = '不读取'
   elements.profileOpenId.textContent = '不读取'
-  elements.profileNote.textContent = '完整登录握手 URL（含 Code）会写入本机会话目录供严格比较；不会上传，服务器同步链路不会启动。'
+  elements.profileNote.textContent = '日志目录将在启动后显示。'
   clearProfileAvatar()
 }
 
 function renderAccountCard() {
-  if (elements.protocolCapture.checked) {
+  const protocolMode = isProtocolMode()
+  elements.profileMeta.classList.toggle('hidden', protocolMode)
+  if (protocolMode) {
     renderProtocolAccount()
     return
   }
@@ -586,8 +640,8 @@ function updateStages(phase) {
 
 function showStatusToast(status) {
   if (status.phase === 'waiting_login') {
-    const confirmed = status.title === 'QQ 已确认，等待农场登录'
-    const switched = status.detail?.includes('切换')
+    const confirmed = /^QQ\s/.test(status.detail || '')
+    const switched = status.detail?.includes('→')
     showToast(status.detail || status.title, {
       type: confirmed ? (switched ? 'warning' : 'success') : 'warning',
       duration: confirmed ? 6000 : 9000,
@@ -644,8 +698,8 @@ async function saveSettings() {
     const result = await invoke('save_settings', settingsPayload())
     fillSettings(result)
     elements.serverToken.value = ''
-    const message = elements.protocolCapture.checked
-      ? '协议模式与本地代理端口已保存；启动时会把完整握手 URL（含 Code）写入本机，但不会上传。'
+    const message = isProtocolMode()
+      ? '协议模式设置已保存。'
       : '服务器地址、同步选项、更新下载方式和本地设置均已更新。'
     showMessage(message, { type: 'success', title: '设置已保存' })
   }
@@ -689,7 +743,7 @@ async function startCapture() {
     dismissToast('identity-unavailable')
   }
   catch (error) {
-    const title = elements.protocolCapture.checked ? '无法启动协议监听' : '无法启动获取'
+    const title = isProtocolMode() ? '无法启动协议监听' : '无法启动获取'
     showMessage(String(error), { type: 'error', title, duration: 10000 })
   }
   finally {
@@ -933,8 +987,8 @@ async function bootstrap() {
   fillSettings(data)
   renderStatus(data.status)
   const initialIdentity = await detectLocalQq({ notify: false })
-  if (!initialIdentity && !elements.protocolCapture.checked) {
-    showMessage(`${currentIdentityError || '尚未检测到 Windows QQ。'} 你仍可先点击“启动获取”启动代理，随后再登录 QQ。`, {
+  if (!initialIdentity && !isProtocolMode()) {
+    showMessage(`${currentIdentityError || '尚未检测到 Windows QQ。'}\n仍可先启动代理，再登录 QQ。`, {
       type: 'warning',
       toast: false,
     })
@@ -954,12 +1008,21 @@ elements.checkUpdateButton.addEventListener('click', () => checkForUpdate())
 elements.copyButton.addEventListener('click', copyCode)
 elements.detectQqButton.addEventListener('click', () => detectLocalQq())
 elements.installUpdateButton.addEventListener('click', installUpdate)
+elements.versionChip.addEventListener('click', handleVersionChipClick)
 elements.updateProxy.addEventListener('change', saveUpdateProxyPreference)
 elements.autoSync.addEventListener('change', syncTaskUi)
 elements.protocolCapture.addEventListener('change', () => {
+  savedProtocolCapture = elements.protocolCapture.checked
   syncTaskUi()
   renderAccountCard()
   showMessage('')
+})
+elements.proxyPort.addEventListener('input', () => {
+  elements.stageProxyPort.textContent = String(elements.proxyPort.value || 8899)
+  if (isProtocolMode()) {
+    syncModePresentation()
+    renderAccountCard()
+  }
 })
 elements.toggleToken.addEventListener('click', () => {
   const hidden = elements.serverToken.type === 'password'

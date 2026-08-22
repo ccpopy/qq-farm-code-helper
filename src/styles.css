@@ -197,7 +197,12 @@ button:focus-visible, .switch-field input:focus-visible + i, .protocol-toggle in
   backdrop-filter: blur(4px);
   font: 700 10px Bahnschrift, sans-serif;
   letter-spacing: 0.04em;
+  cursor: pointer;
+  user-select: none;
 }
+
+.version-chip:active { transform: translateY(1px); }
+.version-chip.developer-unlocked { color: #825f28; border-color: #d3bb8d; background: rgba(255, 248, 230, 0.84); }
 
 /* 滚动区：隐藏原生滚动条，改用悬浮细滚动条 */
 .scroll-area { position: relative; flex: 1 1 auto; min-height: 0; }
@@ -245,7 +250,8 @@ button:focus-visible, .switch-field input:focus-visible + i, .protocol-toggle in
 .status-signal.error { border-color: #d79b94; }
 .status-signal.error span { background: var(--danger); }
 .status-copy h2, .profile-topline h2, .section-heading h2 { margin: 0; color: var(--text); font-size: 18px; }
-.status-copy > p:last-child { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.status-copy { min-width: 0; }
+.status-copy > p:last-child { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
 .status-code { padding: 6px 8px; color: #87907f; border: 1px solid var(--line); border-radius: 8px; background: var(--card-soft); font: 700 9px Bahnschrift, sans-serif; letter-spacing: 0.08em; }
 
 .stage-list { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; margin: 17px 0 15px; padding: 0; list-style: none; }
@@ -319,6 +325,7 @@ button:focus-visible, .switch-field input:focus-visible + i, .protocol-toggle in
 .switch-field input:checked + i::after { left: 18px; background: var(--green); }
 
 .form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 12px; }
+.form-grid.protocol-locked { grid-template-columns: repeat(2, 1fr); }
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field-wide { grid-column: 1 / -1; }
 .field > span { color: #5d6258; font-size: 10px; font-weight: 700; }

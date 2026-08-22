@@ -12,12 +12,7 @@ pub struct StatusPayload {
 
 impl StatusPayload {
     pub fn idle() -> Self {
-        Self::new(
-            "idle",
-            "尚未启动",
-            "保存服务器设置后，启动一次性本地代理。",
-            false,
-        )
+        Self::new("idle", "待启动", "点击“启动获取”，再打开 QQ 农场。", false)
     }
 
     pub fn new(

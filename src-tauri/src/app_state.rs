@@ -148,12 +148,9 @@ impl AppCore {
         app: AppHandle,
         settings: AppSettings,
     ) -> Result<(), String> {
+        let preparing_detail = format!("代理端口 {}", settings.proxy_port);
         let (tls, listener) = self
-            .prepare_proxy_listener(
-                &app,
-                settings.proxy_port,
-                "生成临时证书并保存当前系统代理设置…",
-            )
+            .prepare_proxy_listener(&app, settings.proxy_port, &preparing_detail)
             .await?;
         let cancellation = CancellationToken::new();
         let identity_cancellation = cancellation.clone();
@@ -182,8 +179,12 @@ impl AppCore {
             &app,
             StatusPayload::new(
                 "waiting_login",
-                "等待 Windows QQ 登录",
-                waiting_login_detail(settings.auto_sync, settings.sync_official_friends),
+                "等待农场登录",
+                waiting_login_detail(
+                    settings.proxy_port,
+                    settings.auto_sync,
+                    settings.sync_official_friends,
+                ),
                 false,
             ),
         )
@@ -199,12 +200,9 @@ impl AppCore {
         app: AppHandle,
         settings: AppSettings,
     ) -> Result<(), String> {
+        let preparing_detail = format!("代理端口 {}", settings.proxy_port);
         let (tls, listener) = self
-            .prepare_proxy_listener(
-                &app,
-                settings.proxy_port,
-                "准备本地协议归档目录，并保存当前系统代理设置…",
-            )
+            .prepare_proxy_listener(&app, settings.proxy_port, &preparing_detail)
             .await?;
         let session = match ProtocolCaptureSession::create(&self.protocol_capture_root) {
             Ok(session) => session,
@@ -230,8 +228,8 @@ impl AppCore {
             &app,
             StatusPayload::new(
                 "protocol_listening",
-                "协议监听中",
-                protocol_listening_detail(session.directory()),
+                "协议模式",
+                protocol_listening_detail(settings.proxy_port, session.directory()),
                 false,
             ),
         )
@@ -273,17 +271,12 @@ impl AppCore {
             let summary = session.summary();
             StatusPayload::new(
                 "stopped",
-                "协议监听已停止",
-                protocol_capture_completion_detail(&summary, "系统代理和临时证书已恢复"),
+                "协议模式已停止",
+                protocol_capture_completion_detail(&summary, "网络已恢复"),
                 false,
             )
         } else {
-            StatusPayload::new(
-                "stopped",
-                "已停止",
-                "系统代理和临时证书已恢复。",
-                self.has_code().await,
-            )
+            StatusPayload::new("stopped", "已停止", "网络已恢复", self.has_code().await)
         };
         self.publish(app, status).await;
         Ok(())
@@ -297,15 +290,15 @@ impl AppCore {
             let summary = session.summary();
             StatusPayload::new(
                 "idle",
-                "协议监听已清理",
-                protocol_capture_completion_detail(&summary, "系统代理与临时证书均已清理"),
+                "协议模式已清理",
+                protocol_capture_completion_detail(&summary, "网络已清理"),
                 false,
             )
         } else {
             StatusPayload::new(
                 "idle",
-                "清理完成",
-                "系统代理与临时证书均已清理。",
+                "网络已清理",
+                "代理已关闭，临时证书已移除",
                 self.has_code().await,
             )
         };
@@ -337,7 +330,7 @@ impl AppCore {
         if runtime.status.phase == "waiting_login" && changed {
             let status = StatusPayload::new(
                 "waiting_login",
-                "QQ 已确认，等待农场登录",
+                "等待农场登录",
                 waiting_identity_detail(previous.as_deref(), &identity),
                 false,
             );
@@ -399,16 +392,16 @@ impl AppCore {
     async fn handle_captured_login(&self, app: AppHandle, captured: proxy::CapturedLogin) {
         self.set_code(Some(captured.code.clone())).await;
         let captured_detail = if captured.friend_gids.is_empty() {
-            "官方登录已完成转发并保留 Code，正在恢复系统网络设置。".to_owned()
+            "Code 已获取\n正在恢复网络".to_owned()
         } else {
             format!(
-                "官方登录已完成转发，并从官方好友响应读取 {} 个 GID；正在恢复系统网络设置。",
+                "Code 已获取 · 好友 GID {} 个\n正在恢复网络",
                 captured.friend_gids.len()
             )
         };
         self.publish(
             &app,
-            StatusPayload::new("code_captured", "已获取登录数据", captured_detail, true),
+            StatusPayload::new("code_captured", "已获取 Code", captured_detail, true),
         )
         .await;
 
@@ -421,7 +414,7 @@ impl AppCore {
             StatusPayload::new(
                 "code_captured",
                 "已获取 Code",
-                "系统网络已恢复，正在确认捕获账号…",
+                "网络已恢复\n正在确认 QQ",
                 true,
             ),
         )
@@ -439,12 +432,7 @@ impl AppCore {
         } else {
             self.publish(
                 &app,
-                StatusPayload::new(
-                    "completed",
-                    "Code 已就绪",
-                    "自动同步已关闭，可点击“复制 Code”手动使用。",
-                    true,
-                ),
+                StatusPayload::new("completed", "Code 可复制", "网络已恢复", true),
             )
             .await;
         }
@@ -469,12 +457,7 @@ impl AppCore {
         };
         self.publish(
             app,
-            StatusPayload::new(
-                "syncing",
-                "正在同步服务器",
-                "同步 Code，并等待远程 GID/OpenID 确认身份…",
-                true,
-            ),
+            StatusPayload::new("syncing", "正在同步", "Code 已获取\n正在确认远程账号", true),
         )
         .await;
         let result = self
@@ -499,7 +482,7 @@ impl AppCore {
                 .await;
             }
             Err(error) => {
-                self.record_failure(app, format!("同步失败，Code 已保留在内存中: {error}"), true)
+                self.record_failure(app, format!("同步失败：{error}\nCode 可复制"), true)
                     .await;
             }
         }
@@ -516,37 +499,21 @@ impl AppCore {
                 .friend_capture_warning
                 .as_deref()
                 .unwrap_or("官方登录期间没有返回可识别的好友 GID");
-            return format!(" 好友同步已跳过：{warning}。");
+            return format!("\n好友未同步：{warning}");
         }
 
         let own_gid = profile.gid.trim();
         if own_gid.is_empty() {
-            return " 好友同步已跳过：远程尚未回填当前账号 GID，无法安全排除自身账号。".to_owned();
+            return "\n好友未同步：远程账号缺少 GID".to_owned();
         }
 
         let friend_gids = friend_gids_without_self(&captured.friend_gids, own_gid);
         let excluded_count = captured.friend_gids.len() - friend_gids.len();
-        let progress_detail = if excluded_count > 0 {
-            format!(
-                "官方返回 {} 个 GID，已在本地排除当前账号，正在清理远程历史记录并提交其余 {} 个好友…",
-                captured.friend_gids.len(),
-                friend_gids.len()
-            )
-        } else {
-            format!(
-                "官方返回 {} 个好友 GID，正在清理远程历史中的自身 GID 并批量写入…",
-                friend_gids.len()
-            )
-        };
+        let progress_detail = format!("好友 GID {} 个\n正在更新远程账号", friend_gids.len());
         self.publish(
             app,
-            StatusPayload::new(
-                "syncing",
-                "Code 已同步，正在导入好友",
-                progress_detail,
-                false,
-            )
-            .with_profile(profile.clone()),
+            StatusPayload::new("syncing", "正在同步好友", progress_detail, false)
+                .with_profile(profile.clone()),
         )
         .await;
 
@@ -563,38 +530,30 @@ impl AppCore {
             )
         };
 
-        let mut detail = format!(
-            " 官方响应共 {} 个 GID，已在本地排除 {} 个当前账号 GID，识别为 {} 个好友。",
-            captured.friend_gids.len(),
-            excluded_count,
-            friend_gids.len()
-        );
+        let mut details = Vec::new();
         match cleanup_result {
-            Ok(result) if result.removed_count > 0 => detail.push_str(&format!(
-                " 已从远程历史缓存清理 {} 个自身 GID。",
-                result.removed_count
-            )),
-            Ok(result) if friend_gids.is_empty() => detail.push_str(&format!(
-                " 远程历史无需清理，当前共保存 {} 个已知好友 GID。",
-                result.known_friend_gid_count
-            )),
             Ok(_) => {}
-            Err(error) => detail.push_str(&format!(" 清理远程历史自身 GID 失败：{error}。")),
+            Err(error) => details.push(format!("清理自身 GID 失败：{error}")),
         }
         match add_result {
-            Some(Ok(result)) => detail.push_str(&format!(
-                " 已向远程提交 {} 个官方好友 GID，本次新增 {} 个，远程当前共保存 {} 个已知好友 GID。",
-                result.submitted_count, result.added_count, result.known_friend_gid_count
+            Some(Ok(result)) => details.push(format!(
+                "好友 GID {} 个 · 新增 {} 个",
+                result.known_friend_gid_count, result.added_count
             )),
-            Some(Err(error)) => detail.push_str(&format!(
-                " Code 已同步成功，但批量写入远程好友 GID 失败：{error}。"
-            )),
-            None => detail.push_str(" 排除自身账号后没有可提交的好友 GID。"),
+            Some(Err(error)) => details.push(format!("好友同步失败：{error}")),
+            None => details.push("好友 GID 0 个".to_owned()),
+        }
+        if excluded_count > 0 {
+            details.push(format!("已排除自身 GID {} 个", excluded_count));
         }
         if let Some(warning) = captured.friend_capture_warning.as_deref() {
-            detail.push_str(&format!(" 捕获说明：{warning}。"));
+            details.push(format!("捕获提示：{warning}"));
         }
-        detail
+        if details.is_empty() {
+            String::new()
+        } else {
+            format!("\n{}", details.join("\n"))
+        }
     }
 
     async fn publish_identity_blocked(&self, app: &AppHandle, reason: &str) {
@@ -602,10 +561,8 @@ impl AppCore {
             app,
             StatusPayload::new(
                 "identity_changed",
-                "未同步：QQ 账号已变化",
-                format!(
-                    "Code 已保留在内存中，且没有向服务器创建账号。{reason}。请确认目标 QQ 后重新启动获取。"
-                ),
+                "未同步",
+                format!("QQ 已变化：{reason}\nCode 可复制"),
                 true,
             ),
         )
@@ -803,7 +760,7 @@ impl AppCore {
             return;
         }
         let detail = waiting_identity_detail(previous.as_deref(), &identity);
-        let status = StatusPayload::new("waiting_login", "QQ 已确认，等待农场登录", detail, false);
+        let status = StatusPayload::new("waiting_login", "等待农场登录", detail, false);
         runtime.status = status.clone();
         let _ = app.emit("capture-status", status);
     }
@@ -821,10 +778,8 @@ impl AppCore {
         }
         let status = StatusPayload::new(
             "waiting_login",
-            "等待 Windows QQ 登录",
-            format!(
-                "本地代理仍在运行，但尚未确认当前 QQ：{error}。若要自动同步，请确认成功后再进入农场；未确认时 Code 不会提交服务器。"
-            ),
+            "等待确认 QQ",
+            format!("代理仍在运行\n{error}"),
             false,
         );
         runtime.status = status.clone();
@@ -944,26 +899,23 @@ fn replace_locked_identity(
     (changed, previous)
 }
 
-fn waiting_login_detail(auto_sync: bool, sync_official_friends: bool) -> &'static str {
+fn waiting_login_detail(proxy_port: u16, auto_sync: bool, sync_official_friends: bool) -> String {
     if auto_sync && sync_official_friends {
-        "本地代理已启动。进入 QQ 农场后会先透明完成官方登录，读取官方 SyncAll 好友 GID，再同步 Code 并批量写入远程；若客户端未触发 SyncAll，Helper 会通过当前官方会话尝试补发。"
+        format!("代理端口 {proxy_port}\n打开 QQ 农场；获取 Code 和好友后自动同步")
     } else if auto_sync {
-        "本地代理已启动。现在可以打开或登录 Windows QQ；检测并锁定当前账号后，再进入 QQ 农场。未确认账号前捕获到 Code 也不会提交服务器。"
+        format!("代理端口 {proxy_port}\n打开 QQ 农场；获取 Code 后自动同步")
     } else {
-        "本地代理已启动。现在可以打开或登录 Windows QQ，再进入 QQ 农场；自动同步已关闭，本次只获取 Code。"
+        format!("代理端口 {proxy_port}\n打开 QQ 农场；获取 Code")
     }
 }
 
-fn protocol_listening_detail(directory: &Path) -> String {
-    format!(
-        "本地协议代理正在持续监听。请进入 QQ 农场并操作需要审查的活动；每条连接的完整握手 URL（含 Code）与双向消息只保存到 {}，不会上传。完成后请手动停止。",
-        directory.display()
-    )
+fn protocol_listening_detail(proxy_port: u16, directory: &Path) -> String {
+    format!("代理端口 {proxy_port}\n日志目录 {}", directory.display())
 }
 
 fn protocol_capture_completion_detail(summary: &CaptureSummary, network_result: &str) -> String {
     format!(
-        "{network_result}；已保存 {} 条连接的完整握手 URL（含 Code），并按收发顺序保存 {} 条消息（{}）到 {}。抓包文件会保留，便于严格比较、协议解码与活动验证。",
+        "{network_result} · {} 个连接 · {} 条消息 · {}\n日志目录 {}",
         summary.connection_count,
         summary.message_count,
         readable_bytes(summary.total_bytes),
@@ -991,13 +943,10 @@ fn waiting_identity_detail(previous: Option<&str>, identity: &LocalQqIdentity) -
     };
     match previous {
         Some(previous) => format!(
-            "已将锁定账号从 QQ {previous} 切换为 QQ {}（{nickname}）。请用当前账号进入 QQ 农场。",
+            "QQ {previous} → {}（{nickname}）\n打开 QQ 农场",
             identity.qq_number
         ),
-        None => format!(
-            "已稳定确认并锁定 QQ {}（{nickname}）。现在可以进入 QQ 农场。",
-            identity.qq_number
-        ),
+        None => format!("QQ {}（{nickname}）\n打开 QQ 农场", identity.qq_number),
     }
 }
 
@@ -1074,14 +1023,11 @@ fn sync_completion_detail(
                 profile.open_id.chars().take(8).collect::<String>()
             )
         };
-        format!("远程已确认 {remote_name}（{identity}）")
+        format!("{remote_name} · {identity}")
     } else {
-        format!("已同步到 {remote_name}，远程 GID/OpenID 仍在等待回填")
+        format!("{remote_name} · 等待 GID/OpenID")
     };
-    format!(
-        "{remote}；本机前台身份确认并绑定 QQ {}。",
-        locked_identity.qq_number
-    )
+    format!("{remote}\nQQ {}", locked_identity.qq_number)
 }
 
 #[cfg(test)]
@@ -1120,12 +1066,43 @@ mod tests {
     }
 
     #[test]
-    fn auto_sync_waiting_copy_allows_proxy_before_qq_but_keeps_upload_guard() {
-        let detail = waiting_login_detail(true, false);
+    fn auto_sync_waiting_copy_reports_port_and_next_step() {
+        let detail = waiting_login_detail(8899, true, false);
 
-        assert!(detail.contains("本地代理已启动"));
-        assert!(detail.contains("打开或登录 Windows QQ"));
-        assert!(detail.contains("不会提交服务器"));
+        assert_eq!(detail, "代理端口 8899\n打开 QQ 农场；获取 Code 后自动同步");
+    }
+
+    #[test]
+    fn protocol_listening_copy_reports_the_port_and_session_directory() {
+        let directory = Path::new("protocol-captures").join("session-123");
+
+        let detail = protocol_listening_detail(8899, &directory);
+
+        assert_eq!(
+            detail,
+            format!("代理端口 8899\n日志目录 {}", directory.display())
+        );
+    }
+
+    #[test]
+    fn protocol_completion_copy_keeps_only_the_result_counts_and_directory() {
+        let directory = Path::new("protocol-captures").join("session-123");
+        let summary = CaptureSummary {
+            directory: directory.clone(),
+            connection_count: 2,
+            message_count: 17,
+            total_bytes: 2048,
+        };
+
+        let detail = protocol_capture_completion_detail(&summary, "网络已恢复");
+
+        assert_eq!(
+            detail,
+            format!(
+                "网络已恢复 · 2 个连接 · 17 条消息 · 2.0 KiB\n日志目录 {}",
+                directory.display()
+            )
+        );
     }
 
     #[test]
@@ -1133,8 +1110,7 @@ mod tests {
         let identity = identity("3170105001", "落");
         let detail = waiting_identity_detail(None, &identity);
 
-        assert!(detail.contains("已稳定确认并锁定"));
-        assert!(!detail.contains("切换"));
+        assert_eq!(detail, "QQ 3170105001（落）\n打开 QQ 农场");
     }
 
     #[test]
