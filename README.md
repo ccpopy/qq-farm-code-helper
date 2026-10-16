@@ -31,6 +31,8 @@
 
 开启服务器设置中的“同步官方好友”后，Helper 会透明转发官方 WebSocket 登录，并从成功的 `FriendService.SyncAll` 响应中提取、去重好友 GID。若客户端在规定时间内没有触发 `SyncAll`，Helper 会通过当前已认证的官方连接补发一次空 `open_ids` 的 `SyncAll`；官方返回 0 位好友或超时时会明确降级，不会伪报成功。
 
+自身 GID 和 OpenID 来自同一次成功的 `UserService.PlayerLogin` 或旧版 `UserService.Login` 响应；仅保存在内存中用于账号卡片显示和排除自身 GID，不依赖远程账号回填。失败登录、场景登录或无效 GID 不会作为自身身份。
+
 Code 成功同步并启动远程账号后，Helper 使用同一服务器 Token 和账号 ID 调用 `/api/friend-known-gids/batch-add`，把本次官方响应中的 GID 写入远程已知好友配置。若没有捕获到好友 GID，Code 同步仍会照常完成，并在结果中说明好友同步被跳过。
 
 ## 应用更新

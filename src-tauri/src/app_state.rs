@@ -465,9 +465,7 @@ impl AppCore {
             .await;
         match result {
             Ok(mut profile) => {
-                if let Some(own_gid) = captured_own_gid(captured) {
-                    profile.gid = own_gid.to_owned();
-                }
+                apply_captured_identity(&mut profile, captured);
                 self.set_code(None).await;
                 let mut detail = sync_completion_detail(&profile, &locked_identity);
                 if settings.sync_official_friends {
@@ -1007,8 +1005,20 @@ fn friend_gids_without_self(captured_gids: &[String], own_gid: &str) -> Vec<Stri
         .collect()
 }
 
+fn apply_captured_identity(
+    profile: &mut crate::server_sync::AccountProfile,
+    captured: &proxy::CapturedLogin,
+) {
+    if let Some(gid) = captured_own_gid(captured) {
+        profile.gid = gid.to_owned();
+        // Both values must come from this login, never mix an old remote OpenID
+        // with the GID captured from the current official connection.
+        profile.open_id = captured.own_identity.as_ref().unwrap().open_id.clone();
+    }
+}
+
 fn captured_own_gid(captured: &proxy::CapturedLogin) -> Option<&str> {
-    let gid = captured.own_gid.as_deref()?.trim();
+    let gid = captured.own_identity.as_ref()?.gid.trim();
     (!gid.is_empty()
         && gid.len() <= 19
         && gid.bytes().all(|byte| byte.is_ascii_digit())
@@ -1170,7 +1180,10 @@ mod tests {
     fn official_own_gid_comes_from_the_captured_login_reply() {
         let captured = proxy::CapturedLogin {
             code: "test-code".to_owned(),
-            own_gid: Some(" 1027000001 ".to_owned()),
+            own_identity: Some(crate::friend_capture::CapturedLoginIdentity {
+                gid: " 1027000001 ".to_owned(),
+                open_id: "current-open-id".to_owned(),
+            }),
             friend_gids: vec!["10001".to_owned()],
             friend_capture_warning: None,
         };
@@ -1188,12 +1201,44 @@ mod tests {
         ] {
             let captured = proxy::CapturedLogin {
                 code: "test-code".to_owned(),
-                own_gid,
+                own_identity: own_gid.map(|gid| crate::friend_capture::CapturedLoginIdentity {
+                    gid,
+                    open_id: String::new(),
+                }),
                 friend_gids: Vec::new(),
                 friend_capture_warning: None,
             };
 
             assert_eq!(captured_own_gid(&captured), None);
+        }
+    }
+
+    #[test]
+    fn current_login_replaces_remote_identity_as_a_pair() {
+        let mut profile = crate::server_sync::AccountProfile {
+            account_id: "remote-account".to_owned(),
+            account_name: "测试账号".to_owned(),
+            nickname: "测试农夫".to_owned(),
+            qq_number: "123456".to_owned(),
+            gid: "old-gid".to_owned(),
+            open_id: "old-open-id".to_owned(),
+            avatar_url: String::new(),
+            running: true,
+        };
+        for open_id in ["current-open-id", ""] {
+            let captured = proxy::CapturedLogin {
+                code: "test-code".to_owned(),
+                own_identity: Some(crate::friend_capture::CapturedLoginIdentity {
+                    gid: "1027000001".to_owned(),
+                    open_id: open_id.to_owned(),
+                }),
+                friend_gids: Vec::new(),
+                friend_capture_warning: None,
+            };
+            apply_captured_identity(&mut profile, &captured);
+            assert_eq!(profile.gid, "1027000001");
+            assert_eq!(profile.open_id, open_id);
+            assert_eq!(profile.account_id, "remote-account");
         }
     }
 

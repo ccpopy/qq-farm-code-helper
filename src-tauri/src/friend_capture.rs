@@ -20,10 +20,16 @@ pub(crate) struct CapturedFriendReply {
     pub gids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedLoginIdentity {
+    pub gid: String,
+    pub open_id: String,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct ServerInspection {
     pub latest_server_seq: i64,
-    pub own_gid: Option<String>,
+    pub own_identity: Option<CapturedLoginIdentity>,
     pub friend_replies: Vec<CapturedFriendReply>,
 }
 
@@ -71,8 +77,8 @@ impl ServerFriendInspector {
                     if let Some(message) = self.process_frame(frame) {
                         inspection.latest_server_seq =
                             inspection.latest_server_seq.max(message.server_seq.max(0));
-                        if inspection.own_gid.is_none() {
-                            inspection.own_gid = message.own_gid;
+                        if inspection.own_identity.is_none() {
+                            inspection.own_identity = message.own_identity;
                         }
                         if let Some(friend_reply) = message.friend_reply {
                             inspection.friend_replies.push(friend_reply);
@@ -284,11 +290,13 @@ struct LoginReply {
 struct BasicInfo {
     #[prost(int64, tag = "1")]
     gid: i64,
+    #[prost(string, tag = "6")]
+    open_id: String,
 }
 
 struct MessageInspection {
     server_seq: i64,
-    own_gid: Option<String>,
+    own_identity: Option<CapturedLoginIdentity>,
     friend_reply: Option<CapturedFriendReply>,
 }
 
@@ -296,36 +304,39 @@ fn inspect_server_message(bytes: &[u8]) -> MessageInspection {
     let Ok(envelope) = GateEnvelope::decode(bytes) else {
         return MessageInspection {
             server_seq: 0,
-            own_gid: None,
+            own_identity: None,
             friend_reply: None,
         };
     };
     let Some(meta) = envelope.meta else {
         return MessageInspection {
             server_seq: 0,
-            own_gid: None,
+            own_identity: None,
             friend_reply: None,
         };
     };
-    let own_gid = extract_own_gid(&meta, &envelope.body);
+    let own_identity = extract_own_identity(&meta, &envelope.body);
     let friend_reply = extract_friend_reply(&meta, &envelope.body);
     MessageInspection {
         server_seq: meta.server_seq,
-        own_gid,
+        own_identity,
         friend_reply,
     }
 }
 
-fn extract_own_gid(meta: &GateMeta, body: &[u8]) -> Option<String> {
+fn extract_own_identity(meta: &GateMeta, body: &[u8]) -> Option<CapturedLoginIdentity> {
     if meta.service_name != USER_SERVICE
-        || meta.method_name != "Login"
+        || !matches!(meta.method_name.as_str(), "Login" | "PlayerLogin")
         || meta.message_type != 2
         || meta.error_code != 0
     {
         return None;
     }
-    let gid = LoginReply::decode(body).ok()?.basic?.gid;
-    (gid > 0).then(|| gid.to_string())
+    let basic = LoginReply::decode(body).ok()?.basic?;
+    (basic.gid > 0).then(|| CapturedLoginIdentity {
+        gid: basic.gid.to_string(),
+        open_id: basic.open_id,
+    })
 }
 
 fn extract_friend_reply(meta: &GateMeta, body: &[u8]) -> Option<CapturedFriendReply> {
@@ -517,10 +528,16 @@ mod tests {
         let split = frame.len() / 2;
         let mut inspector = ServerFriendInspector::new();
 
-        assert_eq!(inspector.feed(&frame[..split]).own_gid, None);
+        assert_eq!(inspector.feed(&frame[..split]).own_identity, None);
         let inspection = inspector.feed(&frame[split..]);
 
-        assert_eq!(inspection.own_gid.as_deref(), Some("1027000001"));
+        assert_eq!(
+            inspection.own_identity,
+            Some(CapturedLoginIdentity {
+                gid: "1027000001".to_owned(),
+                open_id: "private-open-id".to_owned(),
+            })
+        );
         assert_eq!(inspection.latest_server_seq, 13);
         assert!(inspection.friend_replies.is_empty());
     }
@@ -528,10 +545,82 @@ mod tests {
     #[test]
     fn ignores_own_gid_from_failed_or_invalid_login_replies() {
         assert_eq!(
-            inspect_server_message(&login_message(1_027_000_001, 1001)).own_gid,
+            inspect_server_message(&login_message(1_027_000_001, 1001)).own_identity,
             None
         );
-        assert_eq!(inspect_server_message(&login_message(0, 0)).own_gid, None);
+        assert_eq!(
+            inspect_server_message(&login_message(0, 0)).own_identity,
+            None
+        );
+    }
+
+    #[test]
+    fn recognizes_player_login_from_the_current_client() {
+        let mut envelope =
+            GateEnvelope::decode(login_message(1_027_000_001, 0).as_slice()).unwrap();
+        envelope.meta.as_mut().unwrap().method_name = "PlayerLogin".to_owned();
+        let frame = binary_frame(&envelope.encode_to_vec());
+        let mut inspector = ServerFriendInspector::new();
+
+        // The login and first friend reply can arrive in the same TCP read.
+        let mut bytes = frame;
+        bytes.extend(binary_frame(&friend_message(
+            "SyncAll",
+            &[1_027_000_001, 20_001],
+            0,
+        )));
+        let inspection = inspector.feed(&bytes);
+        assert_eq!(
+            inspection.own_identity,
+            Some(CapturedLoginIdentity {
+                gid: "1027000001".to_owned(),
+                open_id: "private-open-id".to_owned(),
+            })
+        );
+        assert_eq!(inspection.friend_replies[0].gids, ["1027000001", "20001"]);
+    }
+
+    #[test]
+    fn rejects_unrelated_failed_or_malformed_player_login() {
+        let valid = login_message(1_027_000_001, 0);
+        for scenario in 0..5 {
+            let mut envelope = GateEnvelope::decode(valid.as_slice()).unwrap();
+            let meta = envelope.meta.as_mut().unwrap();
+            meta.method_name = "PlayerLogin".to_owned();
+            match scenario {
+                0 => meta.service_name = "gamepb.globalscenepb.GlobalSceneService".to_owned(),
+                1 => meta.method_name = "PlayerSceneLogin".to_owned(),
+                2 => meta.message_type = 3,
+                3 => meta.error_code = 1001,
+                _ => envelope.body = vec![0x0a, 0xff],
+            }
+            assert_eq!(
+                inspect_server_message(&envelope.encode_to_vec()).own_identity,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_login_without_optional_open_id_and_does_not_reuse_previous_identity() {
+        let mut envelope =
+            GateEnvelope::decode(login_message(1_027_000_002, 0).as_slice()).unwrap();
+        envelope.meta.as_mut().unwrap().method_name = "PlayerLogin".to_owned();
+        envelope.body = LoginReply {
+            basic: Some(BasicInfo {
+                gid: 1_027_000_002,
+                open_id: String::new(),
+            }),
+        }
+        .encode_to_vec();
+        let mut inspector = ServerFriendInspector::new();
+        inspector.feed(&binary_frame(&login_message(1_027_000_001, 0)));
+        let identity = inspector
+            .feed(&binary_frame(&envelope.encode_to_vec()))
+            .own_identity
+            .unwrap();
+        assert_eq!(identity.gid, "1027000002");
+        assert!(identity.open_id.is_empty());
     }
 
     #[test]
