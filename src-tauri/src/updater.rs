@@ -1,3 +1,4 @@
+use crate::settings::normalize_update_proxy_url;
 use reqwest::{
     Client,
     header::{ACCEPT, ACCEPT_ENCODING},
@@ -16,7 +17,6 @@ use url::Url;
 const GITHUB_RELEASE_API: &str =
     "https://api.github.com/repos/ccpopy/qq-farm-code-helper/releases/latest";
 const GITHUB_DOWNLOAD_PREFIX: &str = "/ccpopy/qq-farm-code-helper/releases/download/";
-const DOWNLOAD_PROXY: &str = "https://gh.lessdo.top";
 const USER_AGENT: &str = "qq-farm-code-helper-updater";
 const MAX_ASSET_BYTES: u64 = 200 * 1024 * 1024;
 const INSTALLED_EXECUTABLE_NAME: &str = "qq-farm-code-helper.exe";
@@ -119,7 +119,7 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
     Ok(select_release(release, current_executable)?.info)
 }
 
-pub async fn prepare_update(use_proxy: bool) -> Result<PreparedUpdate, String> {
+pub async fn prepare_update(use_proxy: bool, proxy_url: &str) -> Result<PreparedUpdate, String> {
     let _guard = UpdateGuard::acquire()?;
     let release = fetch_latest_release().await?;
     let current_executable =
@@ -132,7 +132,7 @@ pub async fn prepare_update(use_proxy: bool) -> Result<PreparedUpdate, String> {
         ));
     }
 
-    let package_path = download_and_verify(&selection.asset, use_proxy).await?;
+    let package_path = download_and_verify(&selection.asset, use_proxy, proxy_url).await?;
     let install_directory = selection
         .current_executable
         .parent()
@@ -282,17 +282,22 @@ fn validated_github_download_url(value: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-fn asset_download_url(asset_url: &str, use_proxy: bool) -> Result<Url, String> {
+fn asset_download_url(asset_url: &str, use_proxy: bool, proxy_url: &str) -> Result<Url, String> {
     let official = validated_github_download_url(asset_url)?;
     if !use_proxy {
         return Ok(official);
     }
-    Url::parse(&format!("{DOWNLOAD_PROXY}/{}", official.as_str()))
+    let prefix = normalize_update_proxy_url(proxy_url)?;
+    Url::parse(&format!("{prefix}{}", official.as_str()))
         .map_err(|_| "GitHub 加速下载地址无效".to_owned())
 }
 
-async fn download_and_verify(asset: &GithubAsset, use_proxy: bool) -> Result<PathBuf, String> {
-    let url = asset_download_url(&asset.browser_download_url, use_proxy)?;
+async fn download_and_verify(
+    asset: &GithubAsset,
+    use_proxy: bool,
+    proxy_url: &str,
+) -> Result<PathBuf, String> {
+    let url = asset_download_url(&asset.browser_download_url, use_proxy, proxy_url)?;
     let response = update_client()?
         .get(url)
         .header(ACCEPT_ENCODING, "identity")
@@ -388,12 +393,32 @@ mod tests {
     fn prefixes_downloads_with_the_configured_proxy() {
         let official = "https://github.com/ccpopy/qq-farm-code-helper/releases/download/v0.1.5/QQFarmCodeHelper-v0.1.5-setup.exe";
         assert_eq!(
-            asset_download_url(official, true).unwrap().as_str(),
-            "https://gh.lessdo.top/https://github.com/ccpopy/qq-farm-code-helper/releases/download/v0.1.5/QQFarmCodeHelper-v0.1.5-setup.exe"
+            asset_download_url(official, true, "").unwrap().as_str(),
+            "https://ghproxy.net/https://github.com/ccpopy/qq-farm-code-helper/releases/download/v0.1.5/QQFarmCodeHelper-v0.1.5-setup.exe"
         );
         assert_eq!(
-            asset_download_url(official, false).unwrap().as_str(),
+            asset_download_url(official, false, "invalid-unused-prefix")
+                .unwrap()
+                .as_str(),
             official
+        );
+        for prefix in [
+            "https://mirror.example.com/cache",
+            "https://mirror.example.com/cache/",
+        ] {
+            assert_eq!(
+                asset_download_url(official, true, prefix).unwrap().as_str(),
+                format!("https://mirror.example.com/cache/{official}")
+            );
+        }
+        assert!(asset_download_url(official, true, "invalid").is_err());
+        assert!(
+            asset_download_url(
+                "https://example.com/other.exe",
+                true,
+                "https://ghproxy.net/"
+            )
+            .is_err()
         );
     }
 
@@ -458,7 +483,9 @@ mod tests {
     async fn downloads_and_verifies_a_live_release_through_the_proxy() {
         let release = fetch_latest_release().await.unwrap();
         let asset = select_asset(&release.assets, PackageKind::Installer).unwrap();
-        let path = download_and_verify(asset, true).await.unwrap();
+        let path = download_and_verify(asset, true, crate::settings::DEFAULT_UPDATE_PROXY_URL)
+            .await
+            .unwrap();
 
         assert_eq!(fs::metadata(&path).unwrap().len(), asset.size);
         fs::remove_file(path).unwrap();
@@ -469,7 +496,7 @@ mod tests {
     async fn downloads_and_verifies_a_live_release_without_the_proxy() {
         let release = fetch_latest_release().await.unwrap();
         let asset = select_asset(&release.assets, PackageKind::Installer).unwrap();
-        let path = download_and_verify(asset, false).await.unwrap();
+        let path = download_and_verify(asset, false, "").await.unwrap();
 
         assert_eq!(fs::metadata(&path).unwrap().len(), asset.size);
         fs::remove_file(path).unwrap();

@@ -51,6 +51,7 @@ const elements = {
   toastViewport: document.querySelector('#toastViewport'),
   updateNotes: document.querySelector('#updateNotes'),
   updateProxy: document.querySelector('#updateProxy'),
+  updateProxyUrl: document.querySelector('#updateProxyUrl'),
   updateProxyHint: document.querySelector('#updateProxyHint'),
   updateStatus: document.querySelector('#updateStatus'),
   updateTarget: document.querySelector('#updateTarget'),
@@ -79,6 +80,8 @@ let hasIdentityResult = false
 let identityRequest = null
 let identitySelectionPending = false
 let latestUpdate = null
+let updateDownloadInProgress = false
+let updateProxySaveQueue = Promise.resolve()
 let preferredQqNumber = ''
 let protocolModeUnlocked = false
 let protocolUnlockClicks = 0
@@ -184,6 +187,7 @@ function settingsPayload() {
       proxy_port: Number(elements.proxyPort.value),
       protocol_capture: isProtocolMode(),
       update_proxy: elements.updateProxy.checked,
+      update_proxy_url: elements.updateProxyUrl.value.trim(),
     },
     token: elements.serverToken.value.trim() || null,
   }
@@ -309,6 +313,7 @@ function fillSettings(data) {
   savedProtocolCapture = data.settings.protocol_capture === true
   elements.protocolCapture.checked = protocolModeUnlocked && savedProtocolCapture
   elements.updateProxy.checked = data.settings.update_proxy !== false
+  elements.updateProxyUrl.value = data.settings.update_proxy_url || 'https://ghproxy.net/'
   syncDeveloperControls()
   syncUpdateProxyHint()
   elements.tokenHint.textContent = data.token_configured
@@ -407,17 +412,32 @@ function syncTaskUi() {
 }
 
 function syncUpdateProxyHint() {
+  elements.updateProxy.disabled = updateDownloadInProgress
+  elements.updateProxyUrl.disabled = updateDownloadInProgress || !elements.updateProxy.checked
   elements.updateProxyHint.textContent = elements.updateProxy.checked
-    ? '通过 gh.lessdo.top 加速下载，执行前仍校验 GitHub 官方 SHA-256。'
+    ? '修改后自动保存；留空恢复默认地址。执行前仍校验 GitHub 官方 SHA-256。'
     : '直接从 GitHub 下载，执行前校验 GitHub 官方 SHA-256。'
+}
+
+async function persistUpdateProxyPreference() {
+  const enabled = elements.updateProxy.checked
+  const proxyUrl = elements.updateProxyUrl.value
+  const request = updateProxySaveQueue.catch(() => {}).then(() => invoke('save_update_proxy', { enabled, proxyUrl }))
+  updateProxySaveQueue = request
+  const normalized = await request
+  if (elements.updateProxyUrl.value === proxyUrl)
+    elements.updateProxyUrl.value = normalized
+  return { useProxy: enabled, proxyUrl: normalized }
 }
 
 async function saveUpdateProxyPreference() {
   syncUpdateProxyHint()
   try {
-    await invoke('save_update_proxy', { enabled: elements.updateProxy.checked })
+    await persistUpdateProxyPreference()
+    elements.updateProxyUrl.removeAttribute('aria-invalid')
   }
   catch (error) {
+    elements.updateProxyUrl.setAttribute('aria-invalid', 'true')
     showToast(String(error), { type: 'warning', title: '更新下载设置未保存', id: 'update-proxy-setting' })
   }
 }
@@ -497,6 +517,8 @@ async function checkForUpdate({ silent = false } = {}) {
 }
 
 async function installUpdate() {
+  if (updateDownloadInProgress)
+    return
   if (!latestUpdate?.updateAvailable) {
     const info = await checkForUpdate()
     if (!info?.updateAvailable)
@@ -504,14 +526,16 @@ async function installUpdate() {
   }
 
   setBusy(elements.installUpdateButton, true, '下载并校验中…')
+  updateDownloadInProgress = true
+  syncUpdateProxyHint()
   elements.checkUpdateButton.disabled = true
   elements.updateStatus.textContent = elements.updateProxy.checked
     ? '正在通过 GitHub 加速地址下载并校验更新包…'
     : '正在直接从 GitHub 下载并校验更新包…'
   elements.updateTarget.textContent = '校验成功后程序会自动退出、停止同路径进程并完成替换。'
   try {
-    await invoke('save_update_proxy', { enabled: elements.updateProxy.checked })
-    await invoke('install_update', { useProxy: elements.updateProxy.checked })
+    const preference = await persistUpdateProxyPreference()
+    await invoke('install_update', preference)
     elements.updateStatus.textContent = '更新包已验证，正在退出并安装…'
   }
   catch (error) {
@@ -519,6 +543,8 @@ async function installUpdate() {
     elements.updateStatus.textContent = '更新未执行，当前版本保持不变。'
     elements.updateTarget.textContent = String(error)
     setBusy(elements.installUpdateButton, false)
+    updateDownloadInProgress = false
+    syncUpdateProxyHint()
     elements.checkUpdateButton.disabled = false
   }
 }
@@ -1010,6 +1036,14 @@ elements.detectQqButton.addEventListener('click', () => detectLocalQq())
 elements.installUpdateButton.addEventListener('click', installUpdate)
 elements.versionChip.addEventListener('click', handleVersionChipClick)
 elements.updateProxy.addEventListener('change', saveUpdateProxyPreference)
+elements.updateProxyUrl.addEventListener('change', saveUpdateProxyPreference)
+elements.updateProxyUrl.addEventListener('input', () => elements.updateProxyUrl.removeAttribute('aria-invalid'))
+elements.updateProxyUrl.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    elements.updateProxyUrl.blur()
+  }
+})
 elements.autoSync.addEventListener('change', syncTaskUi)
 elements.protocolCapture.addEventListener('change', () => {
   savedProtocolCapture = elements.protocolCapture.checked

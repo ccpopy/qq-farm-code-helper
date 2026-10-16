@@ -5,6 +5,7 @@ use url::Url;
 
 const KEYRING_SERVICE: &str = "qq-farm-code-helper";
 const KEYRING_USER: &str = "qq-farm-bot-server-token";
+pub const DEFAULT_UPDATE_PROXY_URL: &str = "https://ghproxy.net/";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -17,6 +18,7 @@ pub struct AppSettings {
     pub proxy_port: u16,
     pub protocol_capture: bool,
     pub update_proxy: bool,
+    pub update_proxy_url: String,
 }
 
 impl Default for AppSettings {
@@ -30,6 +32,7 @@ impl Default for AppSettings {
             proxy_port: 8899,
             protocol_capture: false,
             update_proxy: true,
+            update_proxy_url: DEFAULT_UPDATE_PROXY_URL.to_owned(),
         }
     }
 }
@@ -92,10 +95,18 @@ impl SettingsStore {
         }
     }
 
-    pub fn set_update_proxy(&self, enabled: bool) -> Result<(), String> {
+    pub fn set_update_proxy(&self, enabled: bool, proxy_url: &str) -> Result<String, String> {
         let mut settings = self.load()?;
+        let normalized = normalize_update_proxy_url(proxy_url);
+        settings.update_proxy_url = if enabled {
+            normalized?
+        } else {
+            // An invalid, unfinished edit must not prevent switching to direct downloads.
+            normalized.unwrap_or(settings.update_proxy_url)
+        };
         settings.update_proxy = enabled;
-        write_settings_atomic(&self.path, &settings)
+        write_settings_atomic(&self.path, &settings)?;
+        Ok(settings.update_proxy_url)
     }
 
     fn view_with(&self, settings: AppSettings) -> Result<SettingsView, String> {
@@ -121,8 +132,28 @@ pub fn normalize_server_url(value: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
+pub fn normalize_update_proxy_url(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(DEFAULT_UPDATE_PROXY_URL.to_owned());
+    }
+    let parsed = Url::parse(value).map_err(|_| "GitHub 加速地址格式无效".to_owned())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("GitHub 加速地址必须是有效的 http 或 https 地址".to_owned());
+    }
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("GitHub 加速地址不能包含账号、密码、查询参数或片段".to_owned());
+    }
+    Ok(format!("{}/", parsed.as_str().trim_end_matches('/')))
+}
+
 fn normalize_settings(settings: &mut AppSettings) -> Result<(), String> {
     settings.server_url = normalize_server_url(&settings.server_url)?;
+    settings.update_proxy_url = normalize_update_proxy_url(&settings.update_proxy_url)?;
     settings.account_name = settings.account_name.trim().to_owned();
     if settings.account_name.is_empty() {
         settings.account_name = "Windows QQ".to_owned();
@@ -184,6 +215,10 @@ mod tests {
     #[test]
     fn enables_the_release_download_proxy_by_default() {
         assert!(AppSettings::default().update_proxy);
+        assert_eq!(
+            AppSettings::default().update_proxy_url,
+            "https://ghproxy.net/"
+        );
     }
 
     #[test]
@@ -199,6 +234,7 @@ mod tests {
         .unwrap();
 
         assert!(settings.update_proxy);
+        assert_eq!(settings.update_proxy_url, "https://ghproxy.net/");
         assert!(settings.sync_official_friends);
         assert!(!settings.protocol_capture);
     }
@@ -221,11 +257,51 @@ mod tests {
         };
         write_settings_atomic(&store.path, &settings).unwrap();
 
-        store.set_update_proxy(false).unwrap();
+        store
+            .set_update_proxy(true, " https://proxy.example.com/download ")
+            .unwrap();
+        assert_eq!(
+            store.load().unwrap().update_proxy_url,
+            "https://proxy.example.com/download/"
+        );
+        assert!(store.set_update_proxy(true, "invalid").is_err());
+        assert!(store.load().unwrap().update_proxy);
+        store.set_update_proxy(false, "invalid").unwrap();
 
         let saved = store.load().unwrap();
         assert!(!saved.update_proxy);
+        assert_eq!(
+            saved.update_proxy_url,
+            "https://proxy.example.com/download/"
+        );
         assert_eq!(saved.server_url, "https://farm.example.com");
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn normalizes_download_proxy_prefixes_and_rejects_unsupported_urls() {
+        for value in ["", "  ", "https://ghproxy.net", " https://ghproxy.net/// "] {
+            assert_eq!(
+                normalize_update_proxy_url(value).unwrap(),
+                DEFAULT_UPDATE_PROXY_URL
+            );
+        }
+        assert_eq!(
+            normalize_update_proxy_url("https://proxy.example.com/cache/").unwrap(),
+            "https://proxy.example.com/cache/"
+        );
+        for value in [
+            "invalid",
+            "file:///tmp",
+            "javascript:alert(1)",
+            "https://user:pass@example.com",
+            "https://example.com/?url=",
+            "https://example.com/#path",
+        ] {
+            assert!(
+                normalize_update_proxy_url(value).is_err(),
+                "accepted {value}"
+            );
+        }
     }
 }

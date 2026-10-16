@@ -24,7 +24,7 @@
         <h1>Code 获取助手</h1>
         <p class="brand-subtitle">从 Windows QQ 获取农场登录 Code</p>
       </div>
-      <button class="version-chip" id="versionChip" type="button" aria-label="应用版本">v0.2.4</button>
+      <button class="version-chip" id="versionChip" type="button" aria-label="应用版本">v0.2.5</button>
     </div>
   </header>
 
@@ -207,7 +207,7 @@
                 <p class="section-label">APP UPDATE</p>
                 <h2 id="updateHeading">应用更新</h2>
               </div>
-              <span class="update-version" id="updateVersion">v0.2.4</span>
+              <span class="update-version" id="updateVersion">v0.2.5</span>
             </div>
             <p class="update-status" id="updateStatus" aria-live="polite">启动后自动检查 GitHub Release，也可以手动检查。</p>
             <p class="update-target" id="updateTarget">更新会保留当前程序所在目录。</p>
@@ -219,7 +219,11 @@
               <input id="updateProxy" type="checkbox" checked>
               <i aria-hidden="true"></i>
             </label>
-            <small id="updateProxyHint">默认通过 gh.lessdo.top 下载，安装前仍会校验 GitHub 官方 SHA-256。</small>
+            <label class="field update-proxy-address">
+              <span>加速地址</span>
+              <input id="updateProxyUrl" type="url" value="https://ghproxy.net/" placeholder="https://ghproxy.net/" autocomplete="off" spellcheck="false" aria-describedby="updateProxyHint">
+            </label>
+            <small id="updateProxyHint">修改后自动保存；留空恢复默认地址。执行前仍校验 GitHub 官方 SHA-256。</small>
             <div class="update-actions">
               <button class="text-action" id="checkUpdateButton" type="button">检查更新</button>
               <button class="update-action hidden" id="installUpdateButton" type="button">下载并安装</button>

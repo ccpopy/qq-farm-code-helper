@@ -103,8 +103,12 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
 }
 
 #[tauri::command]
-pub fn save_update_proxy(core: State<'_, Arc<AppCore>>, enabled: bool) -> Result<(), String> {
-    core.set_update_proxy(enabled)
+pub fn save_update_proxy(
+    core: State<'_, Arc<AppCore>>,
+    enabled: bool,
+    proxy_url: String,
+) -> Result<String, String> {
+    core.set_update_proxy(enabled, &proxy_url)
 }
 
 #[tauri::command]
@@ -112,8 +116,9 @@ pub async fn install_update(
     core: State<'_, Arc<AppCore>>,
     app: AppHandle,
     use_proxy: bool,
+    proxy_url: String,
 ) -> Result<(), String> {
-    let prepared = updater::prepare_update(use_proxy).await?;
+    let prepared = updater::prepare_update(use_proxy, &proxy_url).await?;
     core.shutdown().await;
     updater::launch_prepared_update(prepared)?;
     core.mark_exiting();

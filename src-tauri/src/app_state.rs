@@ -123,8 +123,8 @@ impl AppCore {
         self.settings.token()
     }
 
-    pub fn set_update_proxy(&self, enabled: bool) -> Result<(), String> {
-        self.settings.set_update_proxy(enabled)
+    pub fn set_update_proxy(&self, enabled: bool, proxy_url: &str) -> Result<String, String> {
+        self.settings.set_update_proxy(enabled, proxy_url)
     }
 
     pub async fn start_capture(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
