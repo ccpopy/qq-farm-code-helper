@@ -142,11 +142,12 @@ impl AppCore {
 
     pub async fn start_capture(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
         let settings = self.settings.load()?;
-        if !settings.protocol_capture {
-            return Err("请在账号列表中选择要同步的 QQ".to_owned());
-        }
         self.begin_start().await?;
-        let result = self.start_protocol_capture(app, settings).await;
+        let result = if settings.protocol_capture {
+            self.start_protocol_capture(app, settings).await
+        } else {
+            self.start_code_capture(app, settings, None).await
+        };
         self.runtime.lock().await.starting = false;
         result
     }
@@ -158,16 +159,16 @@ impl AppCore {
         app: AppHandle,
         identity: LocalQqIdentity,
     ) -> Result<(), String> {
-        if self.arm_account(&app, &identity).await? {
-            return Ok(());
-        }
         let settings = self.settings.load()?;
         if settings.protocol_capture {
             return Err("协议模式已开启，请先关闭协议模式".to_owned());
         }
         self.validate_sync_settings(&settings)?;
+        if self.arm_account(&app, &identity).await? {
+            return Ok(());
+        }
         self.begin_start().await?;
-        let result = self.start_code_capture(app, settings, identity).await;
+        let result = self.start_code_capture(app, settings, Some(identity)).await;
         self.runtime.lock().await.starting = false;
         result
     }
@@ -227,7 +228,7 @@ impl AppCore {
         self: &Arc<Self>,
         app: AppHandle,
         settings: AppSettings,
-        identity: LocalQqIdentity,
+        identity: Option<LocalQqIdentity>,
     ) -> Result<(), String> {
         let preparing_detail = format!("代理端口 {}", settings.proxy_port);
         let (tls, listener) = self
@@ -235,7 +236,7 @@ impl AppCore {
             .await?;
         let cancellation = CancellationToken::new();
         let identity_cancellation = cancellation.clone();
-        let armed = Arc::new(AtomicBool::new(true));
+        let armed = Arc::new(AtomicBool::new(identity.is_some()));
         let (sender, receiver) = mpsc::channel(4);
         let _ = std::fs::remove_file(&self.diagnostics_path);
         let mode = ProxyMode::CaptureCode {
@@ -253,16 +254,16 @@ impl AppCore {
             let _ = self.stop_transport().await;
             return Err(self.record_failure(&app, error, false).await);
         }
-        self.publish(
-            &app,
-            StatusPayload::new(
+        let status = match identity {
+            Some(identity) => StatusPayload::new(
                 "waiting_login",
                 "等待农场登录",
                 waiting_login_detail(&identity, hint),
                 false,
             ),
-        )
-        .await;
+            None => ready_status(),
+        };
+        self.publish(&app, status).await;
         self.start_identity_monitor(app.clone(), identity_cancellation)
             .await;
         self.spawn_capture_handler(app, receiver).await;
@@ -672,7 +673,7 @@ impl AppCore {
         &self,
         cancellation: CancellationToken,
         task: JoinHandle<()>,
-        identity: LocalQqIdentity,
+        identity: Option<LocalQqIdentity>,
         armed: Arc<AtomicBool>,
         capture_hint: &'static str,
     ) {
@@ -684,8 +685,8 @@ impl AppCore {
         runtime.capture_hint = capture_hint;
         runtime.capture_target = None;
         runtime.last_code = None;
-        runtime.selected_qq_number = Some(identity.qq_number.clone());
-        runtime.locked_identity = Some(identity);
+        runtime.selected_qq_number = identity.as_ref().map(|identity| identity.qq_number.clone());
+        runtime.locked_identity = identity;
         runtime.identity_warning = None;
         runtime.protocol_session = None;
     }

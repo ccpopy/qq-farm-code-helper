@@ -24,7 +24,7 @@
         <h1>Code 获取助手</h1>
         <p class="brand-subtitle">从 Windows QQ 获取农场登录 Code</p>
       </div>
-      <button class="version-chip" id="versionChip" type="button" aria-label="应用版本">v0.2.6</button>
+      <button class="version-chip" id="versionChip" type="button" aria-label="应用版本">v0.2.7</button>
     </div>
   </header>
 
@@ -36,15 +36,15 @@
           <div class="session-copy">
             <p class="section-label" id="sessionLabel">网络接管</p>
             <h2 id="statusTitle">未接管网络</h2>
-            <p id="statusDetail">选择账号开始同步。</p>
+            <p id="statusDetail">启动代理，或选择账号直接同步。</p>
           </div>
           <div class="session-side">
             <span class="session-tally hidden" id="sessionTally"></span>
-            <button class="primary-action hidden" id="startButton" type="button">
+            <button class="primary-action" id="startButton" type="button">
               <span class="button-dot"></span>
-              <span id="startButtonText">启动协议监听</span>
+              <span id="startButtonText">启动代理</span>
             </button>
-            <button class="secondary-action" id="stopButton" type="button" disabled>停止并恢复网络</button>
+            <button class="secondary-action hidden" id="stopButton" type="button" disabled>停止并恢复网络</button>
           </div>
           <div class="protocol-flow hidden" id="protocolFlow" aria-label="协议模式流程">
             <div><span>01</span><strong>代理端口</strong><small id="protocolFlowPort">8899</small></div>
@@ -72,7 +72,7 @@
             <strong id="plotEmptyTitle">正在读取 Windows QQ</strong>
             <p id="plotEmptyDetail">登录后的 QQ 会自动出现在这里。</p>
           </div>
-          <p class="accounts-note">第一次同步会安装临时证书并接管系统代理；之后切换账号不用重新启动，点“停止并恢复网络”结束。</p>
+          <p class="accounts-note">可先启动代理，也可直接点账号同步；只在代理未启动时安装临时证书，之后切换账号无需重复授权，点“停止并恢复网络”结束。</p>
         </section>
 
         <section class="card settings-card reveal reveal-4" id="settingsCard">
@@ -158,7 +158,7 @@
                 <p class="section-label">APP UPDATE</p>
                 <h2 id="updateHeading">应用更新</h2>
               </div>
-              <span class="update-version" id="updateVersion">v0.2.6</span>
+              <span class="update-version" id="updateVersion">v0.2.7</span>
             </div>
             <p class="update-status" id="updateStatus" aria-live="polite">启动后自动检查 GitHub Release，也可以手动检查。</p>
             <p class="update-target" id="updateTarget">更新会保留当前程序所在目录。</p>

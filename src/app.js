@@ -352,7 +352,8 @@ function syncModePresentation() {
   elements.protocolFlow.classList.toggle('hidden', !protocolMode)
   elements.protocolFlow.classList.toggle('listening', listening)
   elements.protocolFlowPort.textContent = String(elements.proxyPort.value || 8899)
-  elements.startButton.classList.toggle('hidden', !protocolMode)
+  elements.startButton.classList.toggle('hidden', !protocolMode && currentSession.active)
+  elements.stopButton.classList.toggle('hidden', !currentSession.active)
   elements.sessionLabel.textContent = protocolMode ? '协议模式' : '网络接管'
 }
 
@@ -373,7 +374,9 @@ function syncTaskUi() {
     element.disabled = isActive
   elements.syncOfficialFriends.disabled = isActive || protocolMode || !elements.autoSync.checked
   elements.startButton.disabled = isActive
-  elements.startButtonText.textContent = isActive && protocolMode ? '正在监听…' : '启动协议监听'
+  elements.startButtonText.textContent = startPending || currentPhase === 'preparing_proxy'
+    ? '正在启动…'
+    : (isActive && protocolMode ? '正在监听…' : (protocolMode ? '启动协议监听' : '启动代理'))
   elements.stopButton.disabled = !currentSession.active || currentPhase === 'preparing_proxy' || stopPending
   elements.cleanupButton.disabled = startPending
     || stopPending
@@ -594,7 +597,7 @@ function liveAccountState(qq) {
 }
 
 function accountBusy() {
-  return Boolean(pendingSyncQq)
+  return startPending || Boolean(pendingSyncQq)
     || ['preparing_proxy', 'code_captured', 'syncing'].includes(currentPhase)
 }
 
@@ -771,6 +774,7 @@ function sessionCopy(status) {
   const target = status.target_qq ? identityByQqNumber(status.target_qq) : null
   const who = target ? `${target.nickname || '未命名'}（QQ ${target.qqNumber}）` : (status.target_qq ? `QQ ${status.target_qq}` : '')
   const detail = {
+    ready: '选择账号开始同步',
     waiting_login: who ? `${who} · 在这个 QQ 里打开农场` : '在所选 QQ 里打开农场',
     code_captured: who ? `${who} · 已获取 Code` : '已获取 Code',
     syncing: who ? `${who} · 正在同步` : '正在同步',
@@ -849,8 +853,11 @@ async function testConnection() {
 }
 
 async function startCapture() {
+  if (startPending || currentSession.active || stopPending)
+    return
   showMessage('')
   startPending = true
+  renderAccounts()
   syncTaskUi()
   try {
     await invoke('save_settings', settingsPayload())
@@ -858,16 +865,17 @@ async function startCapture() {
     await invoke('start_capture')
   }
   catch (error) {
-    showMessage(String(error), { type: 'error', title: '无法启动协议监听', duration: 10000 })
+    showMessage(String(error), { type: 'error', title: isProtocolMode() ? '无法启动协议监听' : '无法启动代理', duration: 10000 })
   }
   finally {
     startPending = false
+    renderAccounts()
     syncTaskUi()
   }
 }
 
 async function syncAccount(qqNumber) {
-  if (pendingSyncQq)
+  if (pendingSyncQq || startPending || stopPending)
     return
   showMessage('')
   const firstStart = !currentSession.active

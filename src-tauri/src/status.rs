@@ -16,7 +16,12 @@ pub struct StatusPayload {
 
 impl StatusPayload {
     pub fn idle() -> Self {
-        Self::new("idle", "未接管网络", "选择账号开始同步。", false)
+        Self::new(
+            "idle",
+            "未接管网络",
+            "启动代理，或选择账号直接同步。",
+            false,
+        )
     }
 
     pub fn new(
