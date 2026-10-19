@@ -3,43 +3,34 @@ const { listen } = window.__TAURI__.event
 
 const elements = {
   accountName: document.querySelector('#accountName'),
+  accountsCard: document.querySelector('#accountsCard'),
+  accountsCount: document.querySelector('#accountsCount'),
   autoSync: document.querySelector('#autoSync'),
   cleanupButton: document.querySelector('#cleanupButton'),
   checkUpdateButton: document.querySelector('#checkUpdateButton'),
-  copyButton: document.querySelector('#copyButton'),
   detectQqButton: document.querySelector('#detectQqButton'),
   inlineMessage: document.querySelector('#inlineMessage'),
   installUpdateButton: document.querySelector('#installUpdateButton'),
-  privacyNote: document.querySelector('#privacyNote'),
-  profileCard: document.querySelector('#profileCard'),
+  plotEmpty: document.querySelector('#plotEmpty'),
+  plotEmptyDetail: document.querySelector('#plotEmptyDetail'),
+  plotEmptyTitle: document.querySelector('#plotEmptyTitle'),
+  plotList: document.querySelector('#plotList'),
   protocolCapture: document.querySelector('#protocolCapture'),
   protocolField: document.querySelector('#protocolField'),
   protocolFlow: document.querySelector('#protocolFlow'),
   protocolFlowPort: document.querySelector('#protocolFlowPort'),
   protocolModeNotice: document.querySelector('#protocolModeNotice'),
   proxyPort: document.querySelector('#proxyPort'),
-  qqNumber: document.querySelector('#qqNumber'),
-  profileAccountPicker: document.querySelector('#profileAccountPicker'),
-  profileAvatar: document.querySelector('#profileAvatar'),
-  profileFallback: document.querySelector('#profileFallback'),
-  profileGid: document.querySelector('#profileGid'),
-  profileIdentity: document.querySelector('#profileIdentity'),
-  profileMeta: document.querySelector('#profileMeta'),
-  profileName: document.querySelector('#profileName'),
-  profileNote: document.querySelector('#profileNote'),
-  profileOpenId: document.querySelector('#profileOpenId'),
-  profileState: document.querySelector('#profileState'),
-  profileStaticIdentity: document.querySelector('#profileStaticIdentity'),
   saveButton: document.querySelector('#saveButton'),
   serverToken: document.querySelector('#serverToken'),
   serverUrl: document.querySelector('#serverUrl'),
+  sessionCard: document.querySelector('#sessionCard'),
+  sessionLabel: document.querySelector('#sessionLabel'),
+  sessionTally: document.querySelector('#sessionTally'),
   settingsForm: document.querySelector('#settingsForm'),
   settingsCard: document.querySelector('#settingsCard'),
-  stageList: [...document.querySelectorAll('#stageList li')],
-  stageProxyPort: document.querySelector('#stageProxyPort'),
   startButton: document.querySelector('#startButton'),
   startButtonText: document.querySelector('#startButtonText'),
-  statusCode: document.querySelector('#statusCode'),
   statusDetail: document.querySelector('#statusDetail'),
   statusSignal: document.querySelector('#statusSignal'),
   statusTitle: document.querySelector('#statusTitle'),
@@ -59,36 +50,30 @@ const elements = {
   versionChip: document.querySelector('#versionChip'),
 }
 
-const stageOrder = ['preparing_proxy', 'waiting_login', 'code_captured', 'syncing']
-const activePhases = new Set([
-  'preparing_proxy',
-  'waiting_login',
-  'code_captured',
-  'syncing',
-  'protocol_listening',
-])
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
 const identityPollInterval = 2000
 const protocolUnlockTarget = 5
 
 let currentPhase = 'idle'
+let currentSession = { active: false, target: null, detail: '' }
 let currentIdentityCandidates = []
-let currentLocalIdentity = null
 let currentIdentityError = ''
-let currentRemoteProfile = null
 let hasIdentityResult = false
 let identityRequest = null
-let identitySelectionPending = false
 let latestUpdate = null
 let updateDownloadInProgress = false
 let updateProxySaveQueue = Promise.resolve()
 let preferredQqNumber = ''
+let pendingSyncQq = null
+let codeQqNumber = null
 let protocolModeUnlocked = false
 let protocolUnlockClicks = 0
 let savedProtocolCapture = false
 let startPending = false
 let stopPending = false
 let toastSequence = 0
+// 本次运行中每个 QQ 的最近结果；停止代理后仍保留，方便对照哪些账号还没同步。
+const accountResults = new Map()
 
 const toastIcons = {
   success: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>',
@@ -181,7 +166,7 @@ function settingsPayload() {
     settings: {
       server_url: elements.serverUrl.value.trim(),
       account_name: elements.accountName.value.trim(),
-      qq_number: elements.qqNumber.value.trim(),
+      qq_number: preferredQqNumber,
       auto_sync: elements.autoSync.checked,
       sync_official_friends: elements.syncOfficialFriends.checked,
       proxy_port: Number(elements.proxyPort.value),
@@ -309,7 +294,6 @@ function fillSettings(data) {
   elements.autoSync.checked = data.settings.auto_sync !== false
   elements.syncOfficialFriends.checked = data.settings.sync_official_friends !== false
   elements.proxyPort.value = data.settings.proxy_port || 8899
-  elements.stageProxyPort.textContent = String(elements.proxyPort.value)
   savedProtocolCapture = data.settings.protocol_capture === true
   elements.protocolCapture.checked = protocolModeUnlocked && savedProtocolCapture
   elements.updateProxy.checked = data.settings.update_proxy !== false
@@ -349,7 +333,7 @@ function handleVersionChipClick() {
   elements.protocolCapture.checked = savedProtocolCapture
   syncDeveloperControls()
   syncTaskUi()
-  renderAccountCard()
+  renderAccounts()
   showToast('协议模式已显示', {
     type: 'success',
     title: '开发者设置',
@@ -362,20 +346,18 @@ function syncModePresentation() {
   const protocolMode = isProtocolMode()
   const listening = currentPhase === 'protocol_listening'
   elements.settingsCard.classList.toggle('protocol-enabled', protocolMode)
-  elements.profileCard.classList.toggle('protocol-enabled', protocolMode)
+  elements.sessionCard.classList.toggle('protocol-enabled', protocolMode)
   elements.protocolField.classList.toggle('active', protocolMode)
   elements.protocolModeNotice.classList.toggle('hidden', !protocolMode)
-  elements.stageList[0]?.parentElement.classList.toggle('hidden', protocolMode)
   elements.protocolFlow.classList.toggle('hidden', !protocolMode)
   elements.protocolFlow.classList.toggle('listening', listening)
   elements.protocolFlowPort.textContent = String(elements.proxyPort.value || 8899)
-  elements.privacyNote.textContent = protocolMode
-    ? '协议日志目录：启动后显示'
-    : '结束任务后自动恢复网络。'
+  elements.startButton.classList.toggle('hidden', !protocolMode)
+  elements.sessionLabel.textContent = protocolMode ? '协议模式' : '网络接管'
 }
 
 function syncTaskUi() {
-  const isActive = activePhases.has(currentPhase) || startPending
+  const isActive = currentSession.active || startPending || currentPhase === 'preparing_proxy'
   const protocolMode = isProtocolMode()
   for (const element of [
     elements.accountName,
@@ -389,25 +371,13 @@ function syncTaskUi() {
     element.disabled = isActive || protocolMode
   for (const element of [elements.protocolCapture, elements.proxyPort, elements.saveButton])
     element.disabled = isActive
-  const canChooseQq = !protocolMode && !startPending && (!isActive || currentPhase === 'waiting_login')
-  elements.detectQqButton.disabled = !canChooseQq || identitySelectionPending
-  elements.qqNumber.disabled = !canChooseQq
-    || identitySelectionPending
-    || currentIdentityCandidates.length === 0
   elements.syncOfficialFriends.disabled = isActive || protocolMode || !elements.autoSync.checked
   elements.startButton.disabled = isActive
-  elements.stopButton.disabled = !isActive
-    || currentPhase === 'preparing_proxy'
-    || stopPending
+  elements.startButtonText.textContent = isActive && protocolMode ? '正在监听…' : '启动协议监听'
+  elements.stopButton.disabled = !currentSession.active || currentPhase === 'preparing_proxy' || stopPending
   elements.cleanupButton.disabled = startPending
     || stopPending
     || currentPhase === 'preparing_proxy'
-  if (protocolMode)
-    elements.startButtonText.textContent = isActive ? '正在监听…' : '启动协议监听'
-  else {
-    const codeActive = ['preparing_proxy', 'waiting_login', 'code_captured', 'syncing'].includes(currentPhase)
-    elements.startButtonText.textContent = codeActive ? '正在获取…' : '启动获取'
-  }
   syncModePresentation()
 }
 
@@ -549,139 +519,239 @@ async function installUpdate() {
   }
 }
 
-function renderProfile(profile) {
-  const accountCount = currentIdentityCandidates.length > 1
-    ? ` · ${currentIdentityCandidates.length} 个`
-    : ''
-  elements.profileState.textContent = `${profile.running ? '运行中' : '已同步'}${accountCount}`
-  elements.profileState.classList.add('ready')
-  elements.profileName.textContent = profile.nickname || profile.accountName || `远程账号 #${profile.accountId}`
-  elements.profileIdentity.textContent = profile.qqNumber
-    ? `QQ ${profile.qqNumber}`
-    : `远程账号 #${profile.accountId}`
-  elements.profileGid.textContent = profile.gid || '等待登录回填'
-  elements.profileOpenId.textContent = profile.openId
-    ? `${profile.openId.slice(0, 8)}${profile.openId.length > 8 ? '…' : ''}`
-    : '等待登录回填'
-  elements.profileNote.textContent = '远程账号已同步。'
-  setProfileAvatar(profile.avatarUrl)
+const plotGlyphs = {
+  seed: '<svg viewBox="0 0 20 20" aria-hidden="true"><ellipse cx="10" cy="11" rx="3.6" ry="4.6"/></svg>',
+  sprout: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 17V9"/><path d="M10 12c-3.4 0-5.4-2-5.8-5 3.2-.3 5.3 1 5.8 3.8"/><path d="M10 10c.4-3 2.6-4.6 5.8-4.2-.1 3-2.2 5-5.8 5"/></svg>',
+  ripe: '<svg viewBox="0 0 20 20" aria-hidden="true"><path class="fill" d="M10 16c-4.2 0-6.4-3-6-7.6C8.6 8 11 10 10 16Z"/><path class="fill" d="M10 16c-.6-5.4 2-8.6 6-8.2.4 4.8-2 8.2-6 8.2Z"/><path d="M10 18v-2"/></svg>',
+  wilted: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 17V8"/><path d="M10 8c-1-2.6-3.4-3.6-6-2.8.8 2.8 3 4.2 6 3.4"/><path d="M10 11c2.8.2 4.6 1.8 4.8 4.6-2.8.3-4.6-1.2-4.8-4.2"/></svg>',
 }
 
-function clearProfileAvatar() {
-  elements.profileAvatar.removeAttribute('src')
-  elements.profileAvatar.classList.remove('visible')
-  elements.profileFallback.classList.remove('hidden')
+function formatClock(date) {
+  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
 
-function setProfileAvatar(avatarUrl) {
-  clearProfileAvatar()
-  if (avatarUrl) {
-    elements.profileAvatar.src = avatarUrl
-    elements.profileAvatar.classList.add('visible')
-    elements.profileFallback.classList.add('hidden')
+function detailLines(text) {
+  return String(text || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+}
+
+function rememberAccountResult(status) {
+  const qq = status.target_qq
+  if (!qq)
+    return
+  const lines = detailLines(status.detail)
+  const identity = identityByQqNumber(qq) || accountResults.get(qq)?.identity
+  if (status.phase === 'completed') {
+    const profile = status.profile
+    const summary = []
+    if (profile?.gid)
+      summary.push(`GID ${profile.gid}`)
+    summary.push(...lines.filter(line => line.includes('好友')))
+    accountResults.set(qq, {
+      state: profile ? 'success' : 'captured',
+      label: profile ? '已同步' : 'Code 可复制',
+      detail: summary.join(' · ') || lines[0] || '',
+      at: new Date(),
+      identity,
+    })
+    preferredQqNumber = qq
+  }
+  else if (status.phase === 'error' || status.phase === 'identity_changed') {
+    accountResults.set(qq, {
+      state: 'failed',
+      label: status.phase === 'identity_changed' ? '未同步' : '同步失败',
+      detail: lines.filter(line => line !== 'Code 可复制').join(' · '),
+      at: new Date(),
+      identity,
+    })
   }
 }
 
-function renderLocalIdentity(identity) {
-  elements.profileState.textContent = currentIdentityCandidates.length > 1
-    ? `${currentIdentityCandidates.length} 个账号`
-    : '本机账号已确认'
-  elements.profileState.classList.add('ready')
-  elements.profileName.textContent = identity.nickname || 'Windows QQ'
-  elements.profileIdentity.textContent = `QQ ${identity.qqNumber}`
-  elements.profileGid.textContent = '同步后回填'
-  elements.profileOpenId.textContent = '同步后回填'
-  const switchHint = currentIdentityCandidates.length > 1 ? '，可在列表切换' : ''
-  elements.profileNote.textContent = `QQ ${identity.qqNumber} 已确认${switchHint}。`
-  setProfileAvatar(identity.avatarUrl)
+function liveAccountState(qq) {
+  if (pendingSyncQq === qq) {
+    return {
+      state: 'working',
+      label: currentSession.active ? '切换中' : '正在启动',
+      detail: currentSession.active ? '正在确认账号' : '正在安装临时证书，请在弹窗中确认',
+    }
+  }
+  if (!currentSession.active || currentSession.target !== qq)
+    return null
+  if (currentPhase === 'waiting_login') {
+    return {
+      state: 'waiting',
+      label: '等待打开农场',
+      detail: detailLines(currentSession.detail).slice(1).join(' · ') || '在这个 QQ 里打开农场',
+    }
+  }
+  if (currentPhase === 'code_captured' || currentPhase === 'syncing') {
+    return {
+      state: 'working',
+      label: currentPhase === 'syncing' ? '正在同步' : '已获取 Code',
+      detail: detailLines(currentSession.detail).join(' · '),
+    }
+  }
+  return null
 }
 
-function renderPendingIdentity() {
-  elements.qqNumber.value = ''
-  elements.profileState.textContent = '正在确认'
-  elements.profileState.classList.remove('ready')
-  elements.profileName.textContent = '正在读取 Windows QQ'
-  elements.profileIdentity.textContent = '等待确认'
-  elements.profileGid.textContent = '—'
-  elements.profileOpenId.textContent = '—'
-  elements.profileNote.textContent = '请保持 QQ 主窗口打开。'
-  clearProfileAvatar()
+function accountBusy() {
+  return Boolean(pendingSyncQq)
+    || ['preparing_proxy', 'code_captured', 'syncing'].includes(currentPhase)
 }
 
-function renderUnconfirmedIdentity(error) {
-  elements.profileState.textContent = currentIdentityCandidates.length > 1
-    ? `请选择 · ${currentIdentityCandidates.length} 个`
-    : '未确认'
-  elements.profileState.classList.remove('ready')
-  elements.profileName.textContent = '未确认当前 Windows QQ'
-  elements.profileIdentity.textContent = '本次不会绑定 QQ 号'
-  elements.profileGid.textContent = '—'
-  elements.profileOpenId.textContent = '—'
-  elements.profileNote.textContent = error || '当前账号无法唯一确认，已清除旧身份显示。'
-  clearProfileAvatar()
+function plotRows() {
+  const rows = currentIdentityCandidates.map(identity => ({ identity, online: true }))
+  for (const [qq, result] of accountResults) {
+    if (!rows.some(row => row.identity.qqNumber === qq))
+      rows.push({ identity: result.identity || { qqNumber: qq, nickname: '', avatarUrl: '' }, online: false })
+  }
+  return rows
 }
 
-function renderProtocolAccount() {
-  elements.profileState.textContent = '开发者'
-  elements.profileState.classList.add('ready')
-  elements.profileName.textContent = '协议模式'
-  elements.profileIdentity.textContent = `代理端口 ${elements.proxyPort.value || 8899}`
-  elements.profileGid.textContent = '不读取'
-  elements.profileOpenId.textContent = '不读取'
-  elements.profileNote.textContent = '日志目录将在启动后显示。'
-  clearProfileAvatar()
+function plotStepIndex(phase) {
+  return { waiting_login: 0, code_captured: 1, syncing: 2 }[phase] ?? -1
 }
 
-function renderAccountCard() {
+function buildPlotRow({ identity, online }) {
+  const qq = identity.qqNumber
+  const live = liveAccountState(qq)
+  const result = accountResults.get(qq)
+  const view = live || result || { state: 'idle', label: '未同步', detail: '' }
+  const glyph = {
+    idle: 'seed',
+    waiting: 'sprout',
+    working: 'sprout',
+    success: 'ripe',
+    captured: 'ripe',
+    failed: 'wilted',
+  }[view.state]
+  const name = identity.nickname || '未命名'
+
+  const item = document.createElement('li')
+  item.className = 'plot'
+  item.dataset.state = view.state
+  if (!online)
+    item.classList.add('offline')
+
+  const avatar = document.createElement('span')
+  avatar.className = 'plot-avatar'
+  avatar.textContent = Array.from(name)[0]
+  if (identity.avatarUrl) {
+    const image = document.createElement('img')
+    image.alt = ''
+    image.referrerPolicy = 'no-referrer'
+    image.src = identity.avatarUrl
+    image.addEventListener('error', () => image.remove())
+    avatar.append(image)
+  }
+  const badge = document.createElement('span')
+  badge.className = 'plot-glyph'
+  badge.innerHTML = plotGlyphs[glyph]
+  avatar.append(badge)
+
+  const who = document.createElement('div')
+  who.className = 'plot-who'
+  const nameElement = document.createElement('strong')
+  nameElement.textContent = name
+  const qqElement = document.createElement('span')
+  qqElement.textContent = online ? `QQ ${qq}` : `QQ ${qq} · 已退出登录`
+  who.append(nameElement, qqElement)
+
+  const state = document.createElement('div')
+  state.className = 'plot-state'
+  const label = document.createElement('b')
+  label.textContent = view.label
+  if (result && !live && result.at) {
+    const time = document.createElement('time')
+    time.textContent = formatClock(result.at)
+    label.append(time)
+  }
+  const detail = document.createElement('small')
+  detail.textContent = view.detail || ''
+  detail.title = view.detail || ''
+  state.append(label, detail)
+
+  const actions = document.createElement('div')
+  actions.className = 'plot-actions'
   const protocolMode = isProtocolMode()
-  elements.profileMeta.classList.toggle('hidden', protocolMode)
-  if (protocolMode) {
-    renderProtocolAccount()
-    return
+  const busy = accountBusy()
+  if (view.state === 'waiting') {
+    actions.append(plotButton('取消', 'plot-secondary', `取消同步 ${name}`, () => cancelAccountSync(), stopPending))
   }
-  if (!hasIdentityResult) {
-    renderPendingIdentity()
-    return
+  else if (view.state !== 'working') {
+    const verb = elements.autoSync.checked ? '同步' : '获取 Code'
+    const again = result ? `重新${elements.autoSync.checked ? '同步' : '获取'}` : verb
+    const disabled = !online || busy || protocolMode || stopPending
+    actions.append(plotButton(again, result ? 'plot-secondary' : 'plot-primary', `${again} ${name}`, () => syncAccount(qq), disabled))
   }
-  if (!currentLocalIdentity) {
-    renderUnconfirmedIdentity(currentIdentityError)
-    return
+  if (codeQqNumber === qq && !live)
+    actions.append(plotButton('复制 Code', 'plot-secondary', `复制 ${name} 的 Code`, copyCode, false))
+
+  item.append(avatar, who, state, actions)
+
+  const active = live && pendingSyncQq !== qq ? plotStepIndex(currentPhase) : -1
+  if (active >= 0) {
+    const steps = document.createElement('ol')
+    steps.className = 'plot-steps'
+    for (const [index, text] of ['打开农场', '获取 Code', elements.autoSync.checked ? '同步到服务器' : '可复制'].entries()) {
+      const step = document.createElement('li')
+      step.textContent = text
+      step.classList.toggle('done', index < active)
+      step.classList.toggle('active', index === active)
+      steps.append(step)
+    }
+    item.append(steps)
   }
-  const remoteMatchesLocal = currentRemoteProfile?.qqNumber
-    && currentRemoteProfile.qqNumber === currentLocalIdentity.qqNumber
-  if (currentPhase === 'completed' && remoteMatchesLocal)
-    renderProfile(currentRemoteProfile)
-  else
-    renderLocalIdentity(currentLocalIdentity)
+  return item
 }
 
-function updateStages(phase) {
-  const activeIndex = stageOrder.indexOf(phase)
-  elements.stageList.forEach((item) => {
-    const index = stageOrder.indexOf(item.dataset.stage)
-    item.classList.toggle('active', index === activeIndex)
-    item.classList.toggle('done', activeIndex > index || phase === 'completed')
-  })
+function plotButton(text, className, ariaLabel, onClick, disabled) {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = className
+  button.textContent = text
+  button.setAttribute('aria-label', ariaLabel)
+  button.disabled = disabled
+  button.addEventListener('click', onClick)
+  return button
+}
+
+function renderAccounts() {
+  const protocolMode = isProtocolMode()
+  elements.accountsCard.classList.toggle('hidden', protocolMode)
+  if (protocolMode)
+    return
+  const rows = plotRows()
+  const focusedLabel = document.activeElement?.closest('#plotList') ? document.activeElement.getAttribute('aria-label') : null
+  elements.plotList.replaceChildren(...rows.map(buildPlotRow))
+  if (focusedLabel) {
+    const next = [...elements.plotList.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === focusedLabel)
+    next?.focus()
+  }
+  elements.accountsCount.textContent = currentIdentityCandidates.length ? String(currentIdentityCandidates.length) : ''
+  elements.plotEmpty.classList.toggle('hidden', rows.length > 0)
+  if (!rows.length) {
+    elements.plotEmptyTitle.textContent = hasIdentityResult ? '没有检测到已登录的 Windows QQ' : '正在读取 Windows QQ'
+    elements.plotEmptyDetail.textContent = hasIdentityResult
+      ? (currentIdentityError || '登录 QQ 后会自动出现在这里，无需刷新。')
+      : '登录后的 QQ 会自动出现在这里。'
+  }
+  renderSessionTally()
+}
+
+function renderSessionTally() {
+  const synced = [...accountResults.values()].filter(result => result.state === 'success').length
+  const total = currentIdentityCandidates.length
+  const show = !isProtocolMode() && synced > 0
+  elements.sessionTally.classList.toggle('hidden', !show)
+  if (show)
+    elements.sessionTally.textContent = total ? `已同步 ${synced} / ${total}` : `已同步 ${synced}`
 }
 
 function showStatusToast(status) {
-  if (status.phase === 'waiting_login') {
-    const confirmed = /^QQ\s/.test(status.detail || '')
-    const switched = status.detail?.includes('→')
-    showToast(status.detail || status.title, {
-      type: confirmed ? (switched ? 'warning' : 'success') : 'warning',
-      duration: confirmed ? 6000 : 9000,
-      id: 'capture-status-waiting_login',
-      title: status.title,
-    })
-    return
-  }
   const config = {
-    code_captured: { type: 'success', duration: 6500 },
-    syncing: { type: 'info', duration: 5200 },
-    protocol_listening: { type: 'success', duration: 8000 },
     completed: { type: 'success', duration: 6000 },
     stopped: { type: 'info', duration: 4200 },
+    protocol_listening: { type: 'success', duration: 8000 },
     identity_changed: { type: 'warning', duration: 9000 },
     error: { type: 'error', duration: 10000 },
   }[status.phase]
@@ -694,24 +764,44 @@ function showStatusToast(status) {
   })
 }
 
+function sessionCopy(status) {
+  if (isProtocolMode() || !['waiting_login', 'code_captured', 'syncing', 'completed', 'error', 'identity_changed', 'ready'].includes(status.phase) || !status.session_active)
+    return { title: status.title, detail: status.detail }
+  const port = elements.proxyPort.value || 8899
+  const target = status.target_qq ? identityByQqNumber(status.target_qq) : null
+  const who = target ? `${target.nickname || '未命名'}（QQ ${target.qqNumber}）` : (status.target_qq ? `QQ ${status.target_qq}` : '')
+  const detail = {
+    waiting_login: who ? `${who} · 在这个 QQ 里打开农场` : '在所选 QQ 里打开农场',
+    code_captured: who ? `${who} · 已获取 Code` : '已获取 Code',
+    syncing: who ? `${who} · 正在同步` : '正在同步',
+  }[status.phase] || '可以选择下一个账号继续同步'
+  return { title: `代理运行中 · 端口 ${port}`, detail }
+}
+
 function renderStatus(status, { notify = false } = {}) {
   const phase = status.phase || 'idle'
   const previousPhase = currentPhase
-  const previousDetail = elements.statusDetail.textContent
+  const previousDetail = currentSession.detail
   currentPhase = phase
-  currentRemoteProfile = status.profile || null
-  const isActive = activePhases.has(phase)
+  currentSession = {
+    active: Boolean(status.session_active),
+    target: status.target_qq || null,
+    detail: status.detail || '',
+  }
+  if (status.code_available && status.target_qq)
+    codeQqNumber = status.target_qq
+  else if (!status.code_available)
+    codeQqNumber = null
+  if (notify && (phase !== previousPhase || status.detail !== previousDetail))
+    rememberAccountResult(status)
+  const isActive = currentSession.active || phase === 'preparing_proxy'
   const isError = phase === 'error' || phase === 'identity_changed'
-  const isSuccess = phase === 'completed'
-  elements.statusTitle.textContent = status.title
-  elements.statusDetail.textContent = status.detail
-  elements.statusCode.textContent = phase.replaceAll('_', ' ').toUpperCase()
-  elements.statusSignal.className = `status-signal ${isActive ? 'active' : ''} ${isSuccess ? 'success' : ''} ${isError ? 'error' : ''}`
-  elements.startButton.disabled = isActive
-  elements.stopButton.disabled = !isActive || phase === 'preparing_proxy'
-  elements.copyButton.classList.toggle('hidden', !status.code_available)
-  updateStages(phase)
-  renderAccountCard()
+  const copy = sessionCopy(status)
+  elements.statusTitle.textContent = copy.title
+  elements.statusDetail.textContent = copy.detail
+  elements.statusSignal.className = `status-signal ${isActive ? 'active' : ''} ${isError && !isActive ? 'error' : ''}`
+  elements.sessionCard.classList.toggle('running', isActive)
+  renderAccounts()
   syncTaskUi()
   if (notify && (phase !== previousPhase || status.detail !== previousDetail))
     showStatusToast(status)
@@ -766,15 +856,53 @@ async function startCapture() {
     await invoke('save_settings', settingsPayload())
     elements.serverToken.value = ''
     await invoke('start_capture')
-    dismissToast('identity-unavailable')
   }
   catch (error) {
-    const title = isProtocolMode() ? '无法启动协议监听' : '无法启动获取'
-    showMessage(String(error), { type: 'error', title, duration: 10000 })
+    showMessage(String(error), { type: 'error', title: '无法启动协议监听', duration: 10000 })
   }
   finally {
     startPending = false
     syncTaskUi()
+  }
+}
+
+async function syncAccount(qqNumber) {
+  if (pendingSyncQq)
+    return
+  showMessage('')
+  const firstStart = !currentSession.active
+  pendingSyncQq = qqNumber
+  startPending = firstStart
+  renderAccounts()
+  syncTaskUi()
+  try {
+    if (firstStart) {
+      preferredQqNumber = qqNumber
+      await invoke('save_settings', settingsPayload())
+      elements.serverToken.value = ''
+    }
+    await invoke('sync_account', { qqNumber })
+    dismissToast('identity-unavailable')
+  }
+  catch (error) {
+    const identity = identityByQqNumber(qqNumber)
+    const title = firstStart ? '无法启动同步' : `无法切换到 ${identity?.nickname || `QQ ${qqNumber}`}`
+    showMessage(String(error), { type: 'error', title, duration: 10000 })
+  }
+  finally {
+    pendingSyncQq = null
+    startPending = false
+    renderAccounts()
+    syncTaskUi()
+  }
+}
+
+async function cancelAccountSync() {
+  try {
+    await invoke('cancel_account_sync')
+  }
+  catch (error) {
+    showToast(String(error), { type: 'warning', title: '无法取消' })
   }
 }
 
@@ -784,6 +912,7 @@ async function stopCapture() {
   stopPending = true
   setBusy(elements.stopButton, true, '正在恢复…')
   syncTaskUi()
+  renderAccounts()
   try {
     await invoke('stop_capture')
   }
@@ -794,6 +923,7 @@ async function stopCapture() {
     stopPending = false
     setBusy(elements.stopButton, false)
     syncTaskUi()
+    renderAccounts()
   }
 }
 
@@ -826,184 +956,57 @@ function identityByQqNumber(qqNumber) {
   return currentIdentityCandidates.find(identity => identity.qqNumber === qqNumber) || null
 }
 
-function preferredDetectedQqNumber(identities) {
-  if (identities.length === 1)
-    return identities[0].qqNumber
-  for (const qqNumber of [elements.qqNumber.value, currentLocalIdentity?.qqNumber, preferredQqNumber]) {
-    if (qqNumber && identities.some(identity => identity.qqNumber === qqNumber))
-      return qqNumber
-  }
-  return ''
+function sameAccounts(next) {
+  return next.length === currentIdentityCandidates.length
+    && next.every((identity, index) => {
+      const current = currentIdentityCandidates[index]
+      return identity.qqNumber === current.qqNumber
+        && identity.nickname === current.nickname
+        && identity.avatarUrl === current.avatarUrl
+    })
 }
 
-function renderQqOptions(identities, selectedQqNumber) {
-  const showPicker = identities.length !== 1
-  elements.profileAccountPicker.classList.toggle('hidden', !showPicker)
-  elements.profileStaticIdentity.classList.toggle('hidden', showPicker)
-  const placeholder = document.createElement('option')
-  placeholder.value = ''
-  placeholder.textContent = identities.length > 1
-    ? `检测到 ${identities.length} 个账号，请选择`
-    : '等待检测 Windows QQ'
-  placeholder.disabled = identities.length > 0
-  const options = identities.map((identity) => {
-    const option = document.createElement('option')
-    option.value = identity.qqNumber
-    option.textContent = `${identity.nickname || '未命名'}（QQ ${identity.qqNumber}）`
-    return option
-  })
-  elements.qqNumber.replaceChildren(placeholder, ...options)
-  elements.qqNumber.value = selectedQqNumber
-}
-
-async function confirmLocalQqSelection(qqNumber, { notify = true, render = true } = {}) {
-  if (!qqNumber) {
-    currentLocalIdentity = null
-    currentIdentityError = currentIdentityCandidates.length > 1
-      ? `检测到 ${currentIdentityCandidates.length} 个 Windows QQ 账号，请选择本次进入农场的账号。`
-      : '尚未检测到可确认的 Windows QQ。'
-    if (render)
-      renderAccountCard()
-    return null
-  }
-
-  identitySelectionPending = true
-  syncTaskUi()
-  try {
-    const identity = await invoke('select_local_qq', { qqNumber })
-    currentLocalIdentity = identity
-    currentIdentityError = ''
-    preferredQqNumber = identity.qqNumber
-    elements.qqNumber.value = identity.qqNumber
-    dismissToast('identity-unavailable')
-    if (render)
-      renderAccountCard()
-    if (notify) {
-      showMessage(`本次已锁定：${identity.nickname || '未命名'}（QQ ${identity.qqNumber}）。`, {
-        type: 'success',
-        title: '已选择 Windows QQ',
-      })
-    }
-    return identity
-  }
-  catch (error) {
-    currentLocalIdentity = null
-    currentIdentityError = String(error)
-    if (render)
-      renderAccountCard()
-    if (notify)
-      showMessage(String(error), { type: 'warning', title: 'QQ 账号选择失败', duration: 9000 })
-    return null
-  }
-  finally {
-    identitySelectionPending = false
-    syncTaskUi()
-  }
-}
-
-async function detectLocalQq({ notify = true, render = true } = {}) {
+async function detectLocalQq({ notify = true } = {}) {
   if (notify)
-    setBusy(elements.detectQqButton, true, '检测中…')
+    elements.detectQqButton.classList.add('spinning')
   try {
     if (!identityRequest)
       identityRequest = invoke('detect_local_qqs').finally(() => { identityRequest = null })
     const identities = await identityRequest
+    const next = Array.isArray(identities) ? identities : []
+    const changed = !hasIdentityResult || currentIdentityError || !sameAccounts(next)
     hasIdentityResult = true
-    currentIdentityCandidates = Array.isArray(identities) ? identities : []
-    const selectedQqNumber = preferredDetectedQqNumber(currentIdentityCandidates)
-    renderQqOptions(currentIdentityCandidates, selectedQqNumber)
-
-    if (!selectedQqNumber) {
-      currentLocalIdentity = null
-      currentIdentityError = `检测到 ${currentIdentityCandidates.length} 个 Windows QQ 账号，请在下拉列表选择本次进入农场的账号。`
-      if (render)
-        renderAccountCard()
-      if (notify)
-        showMessage(currentIdentityError, { type: 'warning', title: '请选择 Windows QQ', duration: 9000 })
-      return null
-    }
-
-    const selectedIdentity = identityByQqNumber(selectedQqNumber)
-    if (currentLocalIdentity?.qqNumber === selectedQqNumber) {
-      currentLocalIdentity = selectedIdentity
-      currentIdentityError = ''
-      if (render)
-        renderAccountCard()
-      if (notify)
-        showMessage(`当前账号：${selectedIdentity.nickname || '未命名'}（QQ ${selectedIdentity.qqNumber}）。`, { type: 'success', title: '已确认 Windows QQ' })
-      return selectedIdentity
-    }
-    return confirmLocalQqSelection(selectedQqNumber, { notify, render })
+    currentIdentityError = ''
+    currentIdentityCandidates = next
+    if (changed)
+      renderAccounts()
+    if (notify)
+      showToast(next.length ? `检测到 ${next.length} 个已登录的 QQ。` : '没有检测到已登录的 Windows QQ。', { type: next.length ? 'success' : 'warning', title: '账号列表已刷新', id: 'identity-unavailable' })
   }
   catch (error) {
+    const changed = !hasIdentityResult || currentIdentityError !== String(error) || currentIdentityCandidates.length
     hasIdentityResult = true
     currentIdentityCandidates = []
-    currentLocalIdentity = null
     currentIdentityError = String(error)
-    renderQqOptions([], '')
-    if (render)
-      renderAccountCard()
+    if (changed)
+      renderAccounts()
     if (notify)
       showMessage(String(error), { type: 'warning', title: '未检测到可确认的 QQ', duration: 9000, id: 'identity-unavailable' })
-    return null
   }
   finally {
     if (notify)
-      setBusy(elements.detectQqButton, false)
-    syncTaskUi()
+      elements.detectQqButton.classList.remove('spinning')
   }
 }
 
 function startIdentityMonitor() {
-  const refresh = async () => {
-    if (document.hidden)
-      return
-    const previous = currentLocalIdentity
-    const previousCandidateCount = currentIdentityCandidates.length
-    const identity = await detectLocalQq({ notify: false })
-    if (previous && !identity) {
-      showToast(currentIdentityError || '请保持新版 QQ 主窗口打开。', {
-        type: 'warning',
-        title: 'QQ 主程序已无法确认',
-        duration: 9000,
-        id: 'identity-state',
-      })
-    }
-    else if (!previous && identity) {
-      showToast(`当前账号：${identity.nickname || '未命名'}（QQ ${identity.qqNumber}）。`, {
-        type: 'success',
-        title: '已检测到 Windows QQ',
-        id: 'identity-state',
-      })
-    }
-    else if (previous && identity && previous.qqNumber !== identity.qqNumber) {
-      showToast(`已从 QQ ${previous.qqNumber} 切换为 ${identity.nickname || '新账号'}（QQ ${identity.qqNumber}）。`, {
-        type: 'warning',
-        title: '检测到 QQ 账号切换',
-        duration: 8000,
-        id: 'identity-state',
-      })
-    }
-    else if (identity && previousCandidateCount <= 1 && currentIdentityCandidates.length > 1) {
-      showToast(`检测到 ${currentIdentityCandidates.length} 个 Windows QQ，当前仍锁定 QQ ${identity.qqNumber}；如需使用其他账号，请在下拉列表切换。`, {
-        type: 'info',
-        title: '可选择其他 QQ 账号',
-        duration: 7000,
-        id: 'identity-state',
-      })
-    }
-    else if (!identity && currentIdentityCandidates.length > 1 && previousCandidateCount !== currentIdentityCandidates.length) {
-      showToast(currentIdentityError, {
-        type: 'warning',
-        title: '请选择 Windows QQ',
-        duration: 9000,
-        id: 'identity-state',
-      })
-    }
+  const refresh = () => {
+    if (!document.hidden)
+      void detectLocalQq({ notify: false })
   }
-  window.setInterval(() => { void refresh() }, identityPollInterval)
-  window.addEventListener('focus', () => { void refresh() })
-  document.addEventListener('visibilitychange', () => { void refresh() })
+  window.setInterval(refresh, identityPollInterval)
+  window.addEventListener('focus', refresh)
+  document.addEventListener('visibilitychange', refresh)
 }
 
 async function bootstrap() {
@@ -1012,13 +1015,7 @@ async function bootstrap() {
   const data = await invoke('get_bootstrap')
   fillSettings(data)
   renderStatus(data.status)
-  const initialIdentity = await detectLocalQq({ notify: false })
-  if (!initialIdentity && !isProtocolMode()) {
-    showMessage(`${currentIdentityError || '尚未检测到 Windows QQ。'}\n仍可先启动代理，再登录 QQ。`, {
-      type: 'warning',
-      toast: false,
-    })
-  }
+  await detectLocalQq({ notify: false })
   if (data.startup_warning)
     showMessage(data.startup_warning, { type: 'error', title: '启动时发现网络恢复问题', duration: 10000 })
   startIdentityMonitor()
@@ -1031,7 +1028,6 @@ elements.startButton.addEventListener('click', startCapture)
 elements.stopButton.addEventListener('click', stopCapture)
 elements.cleanupButton.addEventListener('click', cleanupNetwork)
 elements.checkUpdateButton.addEventListener('click', () => checkForUpdate())
-elements.copyButton.addEventListener('click', copyCode)
 elements.detectQqButton.addEventListener('click', () => detectLocalQq())
 elements.installUpdateButton.addEventListener('click', installUpdate)
 elements.versionChip.addEventListener('click', handleVersionChipClick)
@@ -1044,31 +1040,23 @@ elements.updateProxyUrl.addEventListener('keydown', (event) => {
     elements.updateProxyUrl.blur()
   }
 })
-elements.autoSync.addEventListener('change', syncTaskUi)
+elements.autoSync.addEventListener('change', () => {
+  syncTaskUi()
+  renderAccounts()
+})
 elements.protocolCapture.addEventListener('change', () => {
   savedProtocolCapture = elements.protocolCapture.checked
   syncTaskUi()
-  renderAccountCard()
+  renderAccounts()
   showMessage('')
 })
 elements.proxyPort.addEventListener('input', () => {
-  elements.stageProxyPort.textContent = String(elements.proxyPort.value || 8899)
-  if (isProtocolMode()) {
+  if (isProtocolMode())
     syncModePresentation()
-    renderAccountCard()
-  }
 })
 elements.toggleToken.addEventListener('click', () => {
   const hidden = elements.serverToken.type === 'password'
   elements.serverToken.type = hidden ? 'text' : 'password'
   elements.toggleToken.textContent = hidden ? '隐藏' : '显示'
 })
-elements.qqNumber.addEventListener('change', () => {
-  void confirmLocalQqSelection(elements.qqNumber.value)
-})
-elements.profileAvatar.addEventListener('error', () => {
-  elements.profileAvatar.classList.remove('visible')
-  elements.profileFallback.classList.remove('hidden')
-})
-
 bootstrap().catch(error => showMessage(String(error), { type: 'error', title: '应用初始化失败', duration: 10000 }))

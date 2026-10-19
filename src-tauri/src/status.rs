@@ -8,11 +8,15 @@ pub struct StatusPayload {
     pub detail: String,
     pub code_available: bool,
     pub profile: Option<AccountProfile>,
+    /// 代理与临时证书是否仍在接管网络；切换账号期间保持为 true。
+    pub session_active: bool,
+    /// 当前状态所属的 QQ 号，供前端把结果记到对应账号行。
+    pub target_qq: Option<String>,
 }
 
 impl StatusPayload {
     pub fn idle() -> Self {
-        Self::new("idle", "待启动", "点击“启动获取”，再打开 QQ 农场。", false)
+        Self::new("idle", "未接管网络", "选择账号开始同步。", false)
     }
 
     pub fn new(
@@ -27,6 +31,8 @@ impl StatusPayload {
             detail: detail.into(),
             code_available,
             profile: None,
+            session_active: false,
+            target_qq: None,
         }
     }
 

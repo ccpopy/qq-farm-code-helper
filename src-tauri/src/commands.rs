@@ -83,18 +83,26 @@ pub async fn detect_local_qqs(
 }
 
 #[tauri::command]
-pub async fn select_local_qq(
+pub async fn sync_account(
     core: State<'_, Arc<AppCore>>,
     app: AppHandle,
     qq_number: String,
-) -> Result<LocalQqIdentity, String> {
+) -> Result<(), String> {
     let qq_number = qq_number.trim();
     if qq_number.is_empty() {
-        return Err("请选择本次登录的 QQ 账号".to_owned());
+        return Err("请选择要同步的 QQ 账号".to_owned());
     }
     let identity =
         qq_identity::detect_selected_stable_async(core.login_history(), qq_number).await?;
-    core.select_local_qq(&app, identity).await
+    core.inner().clone().sync_account(app, identity).await
+}
+
+#[tauri::command]
+pub async fn cancel_account_sync(
+    core: State<'_, Arc<AppCore>>,
+    app: AppHandle,
+) -> Result<(), String> {
+    core.cancel_account_sync(&app).await
 }
 
 #[tauri::command]

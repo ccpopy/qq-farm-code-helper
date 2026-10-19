@@ -24,105 +24,56 @@
         <h1>Code 获取助手</h1>
         <p class="brand-subtitle">从 Windows QQ 获取农场登录 Code</p>
       </div>
-      <button class="version-chip" id="versionChip" type="button" aria-label="应用版本">v0.2.5</button>
+      <button class="version-chip" id="versionChip" type="button" aria-label="应用版本">v0.2.6</button>
     </div>
   </header>
 
   <div class="scroll-area" id="scrollArea">
     <div class="scroll-viewport" id="scrollViewport">
       <main class="app-shell">
-        <div class="workspace-grid">
-          <section class="card status-card reveal reveal-2" aria-live="polite">
-            <div class="status-heading">
-              <div class="status-signal" id="statusSignal"><span></span></div>
-              <div class="status-copy">
-                <p class="section-label">当前状态</p>
-                <h2 id="statusTitle">待启动</h2>
-                <p id="statusDetail">点击“启动获取”，再打开 QQ 农场。</p>
-              </div>
-              <span class="status-code" id="statusCode">IDLE</span>
-            </div>
+        <section class="card session-card reveal reveal-2" id="sessionCard" aria-live="polite">
+          <div class="status-signal" id="statusSignal"><span></span></div>
+          <div class="session-copy">
+            <p class="section-label" id="sessionLabel">网络接管</p>
+            <h2 id="statusTitle">未接管网络</h2>
+            <p id="statusDetail">选择账号开始同步。</p>
+          </div>
+          <div class="session-side">
+            <span class="session-tally hidden" id="sessionTally"></span>
+            <button class="primary-action hidden" id="startButton" type="button">
+              <span class="button-dot"></span>
+              <span id="startButtonText">启动协议监听</span>
+            </button>
+            <button class="secondary-action" id="stopButton" type="button" disabled>停止并恢复网络</button>
+          </div>
+          <div class="protocol-flow hidden" id="protocolFlow" aria-label="协议模式流程">
+            <div><span>01</span><strong>代理端口</strong><small id="protocolFlowPort">8899</small></div>
+            <div><span>02</span><strong>监听连接</strong><small>QQ 农场</small></div>
+            <div><span>03</span><strong>写入日志</strong><small>会话目录</small></div>
+            <div><span>04</span><strong>停止</strong><small>恢复网络</small></div>
+          </div>
+        </section>
 
-            <ol class="stage-list" id="stageList">
-              <li data-stage="preparing_proxy">
-                <span class="stage-index">01</span>
-                <span><strong>启动代理</strong><small>端口 <b id="stageProxyPort">8899</b></small></span>
-              </li>
-              <li data-stage="waiting_login">
-                <span class="stage-index">02</span>
-                <span><strong>打开农场</strong><small>等待登录</small></span>
-              </li>
-              <li data-stage="code_captured">
-                <span class="stage-index">03</span>
-                <span><strong>获取 Code</strong><small>Code 与好友</small></span>
-              </li>
-              <li data-stage="syncing">
-                <span class="stage-index">04</span>
-                <span><strong>同步账号</strong><small>自动启动</small></span>
-              </li>
-            </ol>
-
-            <div class="protocol-flow hidden" id="protocolFlow" aria-label="协议模式流程">
-              <div><span>01</span><strong>代理端口</strong><small id="protocolFlowPort">8899</small></div>
-              <div><span>02</span><strong>监听连接</strong><small>QQ 农场</small></div>
-              <div><span>03</span><strong>写入日志</strong><small>会话目录</small></div>
-              <div><span>04</span><strong>停止</strong><small>恢复网络</small></div>
+        <section class="card accounts-card reveal reveal-3" id="accountsCard" aria-labelledby="accountsHeading">
+          <div class="accounts-heading">
+            <div>
+              <p class="section-label">WINDOWS QQ</p>
+              <h2 id="accountsHeading">本机账号 <span class="accounts-count" id="accountsCount"></span></h2>
             </div>
-
-            <div class="action-row">
-              <button class="primary-action" id="startButton" type="button" disabled>
-                <span class="button-dot"></span>
-                <span id="startButtonText">启动获取</span>
-              </button>
-              <button class="secondary-action" id="stopButton" type="button" disabled>停止并恢复网络</button>
-              <button class="secondary-action hidden" id="copyButton" type="button">复制 Code</button>
-            </div>
-          </section>
-
-          <aside class="card profile-card reveal reveal-3" id="profileCard">
-            <div class="profile-topline">
-              <div>
-                <p class="section-label">REMOTE ACCOUNT</p>
-                <h2>同步账号</h2>
-              </div>
-              <span class="profile-state" id="profileState">等待同步</span>
-            </div>
-            <div class="profile-body">
-              <div class="avatar-shell">
-                <img id="profileAvatar" alt="QQ 农场账号头像" referrerpolicy="no-referrer">
-                <span id="profileFallback" aria-hidden="true">🌱</span>
-              </div>
-              <div class="profile-copy">
-                <div id="profileStaticIdentity">
-                  <strong id="profileName">同步后显示农场昵称</strong>
-                  <span id="profileIdentity">单账号自动确认，多账号可选择</span>
-                </div>
-                <div class="profile-account-picker hidden" id="profileAccountPicker">
-                  <div class="profile-picker-heading">
-                    <label for="qqNumber">本次进入农场</label>
-                    <button id="detectQqButton" type="button" title="重新检测 Windows QQ" aria-label="重新检测 Windows QQ">
-                      <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M19 8a8 8 0 1 0 1 6"></path>
-                        <path d="M19 3v5h-5"></path>
-                      </svg>
-                    </button>
-                  </div>
-                  <div class="profile-select-wrap">
-                    <select id="qqNumber" aria-label="选择本次登录的 Windows QQ">
-                      <option value="">等待检测 Windows QQ</option>
-                    </select>
-                    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4"></path></svg>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <dl class="profile-meta" id="profileMeta">
-              <div><dt>农场 GID</dt><dd id="profileGid">—</dd></div>
-              <div><dt>OpenID</dt><dd id="profileOpenId">—</dd></div>
-            </dl>
-            <p class="profile-note" id="profileNote">正在确认 Windows QQ。</p>
-          </aside>
-        </div>
+            <button class="icon-action" id="detectQqButton" type="button" title="重新检测 Windows QQ" aria-label="重新检测 Windows QQ">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M19 8a8 8 0 1 0 1 6"></path>
+                <path d="M19 3v5h-5"></path>
+              </svg>
+            </button>
+          </div>
+          <ul class="plot-list" id="plotList" aria-label="Windows QQ 账号"></ul>
+          <div class="plot-empty hidden" id="plotEmpty">
+            <strong id="plotEmptyTitle">正在读取 Windows QQ</strong>
+            <p id="plotEmptyDetail">登录后的 QQ 会自动出现在这里。</p>
+          </div>
+          <p class="accounts-note">第一次同步会安装临时证书并接管系统代理；之后切换账号不用重新启动，点“停止并恢复网络”结束。</p>
+        </section>
 
         <section class="card settings-card reveal reveal-4" id="settingsCard">
           <div class="section-heading">
@@ -207,7 +158,7 @@
                 <p class="section-label">APP UPDATE</p>
                 <h2 id="updateHeading">应用更新</h2>
               </div>
-              <span class="update-version" id="updateVersion">v0.2.5</span>
+              <span class="update-version" id="updateVersion">v0.2.6</span>
             </div>
             <p class="update-status" id="updateStatus" aria-live="polite">启动后自动检查 GitHub Release，也可以手动检查。</p>
             <p class="update-target" id="updateTarget">更新会保留当前程序所在目录。</p>
@@ -231,10 +182,6 @@
           </div>
         </section>
 
-        <footer class="privacy-note reveal reveal-4">
-          <span>●</span>
-          <p id="privacyNote">结束任务后自动恢复网络。</p>
-        </footer>
       </main>
     </div>
     <div class="scroll-bar" id="scrollBar" aria-hidden="true">

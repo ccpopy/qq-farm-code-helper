@@ -10,7 +10,10 @@ use std::{
     io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -30,13 +33,31 @@ const TARGET_PATH: &str = "/prod/ws";
 #[derive(Clone)]
 pub enum ProxyMode {
     CaptureCode {
-        captured: mpsc::Sender<CapturedLogin>,
+        captured: mpsc::Sender<CaptureEvent>,
+        /// 只有选中账号后才拦截农场登录；未布防时目标连接按普通隧道透传。
+        armed: Arc<AtomicBool>,
         capture_friend_gids: bool,
         diagnostics_path: Option<PathBuf>,
     },
     ProtocolCapture {
         session: Arc<ProtocolCaptureSession>,
     },
+}
+
+impl ProxyMode {
+    fn intercepts_target(&self) -> bool {
+        match self {
+            Self::CaptureCode { armed, .. } => armed.load(Ordering::SeqCst),
+            Self::ProtocolCapture { .. } => true,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum CaptureEvent {
+    /// 已从登录请求中取得 Code，本次布防随即失效，好友读取可能仍在进行。
+    Intercepted,
+    Captured(CapturedLogin),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +137,7 @@ async fn handle_client(
     let request = ParsedRequest::parse(&headers)?;
     if request.method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = parse_authority(&request.target)?;
-        if host.eq_ignore_ascii_case(TARGET_HOST) && port == 443 {
+        if host.eq_ignore_ascii_case(TARGET_HOST) && port == 443 && mode.intercepts_target() {
             return intercept_target(client, tls_config, mode, upstream_tls).await;
         }
         return tunnel_connect(client, &host, port).await;
@@ -145,19 +166,27 @@ async fn intercept_target(
     match mode {
         ProxyMode::CaptureCode {
             captured,
+            armed,
             capture_friend_gids,
             diagnostics_path,
         } => {
             let request = ParsedRequest::parse(&headers)?;
             log_target_request_diagnostics(&headers, &request, diagnostics_path.as_deref());
             let code = extract_farm_code(&request.target, &request.host)?;
+            // 同一次布防只认领第一条登录，避免并发连接把 Code 归到错误账号。
+            let claimed = armed.swap(false, Ordering::SeqCst);
+            if claimed {
+                let _ = captured.try_send(CaptureEvent::Intercepted);
+            }
             if !capture_friend_gids {
-                let _ = captured.try_send(CapturedLogin {
-                    code,
-                    own_identity: None,
-                    friend_gids: Vec::new(),
-                    friend_capture_warning: None,
-                });
+                if claimed {
+                    let _ = captured.try_send(CaptureEvent::Captured(CapturedLogin {
+                        code,
+                        own_identity: None,
+                        friend_gids: Vec::new(),
+                        friend_capture_warning: None,
+                    }));
+                }
                 return write_blocked_response(&mut tls).await;
             }
 
@@ -168,12 +197,14 @@ async fn intercept_target(
                     Ok(outcome) => (outcome.own_identity, outcome.gids, outcome.warning),
                     Err(error) => (None, Vec::new(), Some(error)),
                 };
-            let _ = captured.try_send(CapturedLogin {
-                code,
-                own_identity,
-                friend_gids,
-                friend_capture_warning,
-            });
+            if claimed {
+                let _ = captured.try_send(CaptureEvent::Captured(CapturedLogin {
+                    code,
+                    own_identity,
+                    friend_gids,
+                    friend_capture_warning,
+                }));
+            }
             Ok(())
         }
         ProxyMode::ProtocolCapture { session } => {
@@ -494,13 +525,15 @@ mod tests {
         let listener = bind(0).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let cancellation = CancellationToken::new();
-        let (sender, mut receiver) = mpsc::channel(1);
+        let (sender, mut receiver) = mpsc::channel(4);
+        let armed = Arc::new(AtomicBool::new(true));
         let task = tokio::spawn(run(
             listener,
             material.server_config,
             cancellation.clone(),
             ProxyMode::CaptureCode {
                 captured: sender,
+                armed: armed.clone(),
                 capture_friend_gids: false,
                 diagnostics_path: None,
             },
@@ -520,7 +553,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status().as_u16(), 451);
-        assert_eq!(receiver.recv().await.unwrap().code, TEST_CODE);
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            CaptureEvent::Intercepted
+        ));
+        let CaptureEvent::Captured(captured) = receiver.recv().await.unwrap() else {
+            panic!("expected captured login");
+        };
+        assert_eq!(captured.code, TEST_CODE);
+        assert!(!armed.load(Ordering::SeqCst));
         cancellation.cancel();
         task.await.unwrap();
     }
