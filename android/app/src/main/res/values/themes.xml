@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.FarmHelper" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">#276554</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">#416E87</item>
+        <item name="colorSecondaryContainer">@color/farm_tint</item>
+        <item name="colorOnSecondaryContainer">@color/farm_ink</item>
+        <item name="colorSurface">@color/farm_surface</item>
+        <item name="colorOnSurface">@color/farm_ink</item>
+        <item name="android:windowLightStatusBar">@bool/light_system_bars</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+    </style>
+    <color name="farm_surface">#F2F6F5</color>
+    <color name="farm_ink">#203C35</color>
+    <color name="farm_card">#FFFFFF</color>
+    <color name="farm_muted">#5F736C</color>
+    <color name="farm_accent">#276554</color>
+    <color name="farm_tint">#DAEBE3</color>
+</resources>

@@ -1,0 +1,20 @@
+<resources>
+    <item name="passthrough_mode" type="id" />
+    <item name="nav_capture" type="id" />
+    <item name="nav_accounts" type="id" />
+    <item name="nav_logs" type="id" />
+    <item name="nav_settings" type="id" />
+    <item name="screen_root" type="id" />
+    <item name="screen_scroll" type="id" />
+    <item name="bottom_navigation" type="id" />
+    <item name="configure_server" type="id" />
+    <item name="server_address" type="id" />
+    <item name="server_token" type="id" />
+    <item name="server_http" type="id" />
+    <item name="save_server" type="id" />
+    <item name="server_feedback" type="id" />
+    <item name="poll_interval" type="id" />
+    <item name="download_mirror" type="id" />
+    <item name="manual_code" type="id" />
+    <item name="manual_gids" type="id" />
+</resources>

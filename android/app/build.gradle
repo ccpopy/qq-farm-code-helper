@@ -1,0 +1,59 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'io.github.ccpopy.farmhelper'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'io.github.ccpopy.farmhelper'
+        minSdk 29
+        targetSdk 36
+        versionCode 1
+        versionName '0.1.0'
+    }
+
+    signingConfigs {
+        release {
+            if (System.getenv('ANDROID_KEYSTORE_PATH')) {
+                storeFile file(System.getenv('ANDROID_KEYSTORE_PATH'))
+                storePassword System.getenv('ANDROID_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('ANDROID_KEY_ALIAS')
+                keyPassword System.getenv('ANDROID_KEY_PASSWORD')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            signingConfig signingConfigs.release
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildFeatures { buildConfig true }
+    lint { abortOnError true }
+}
+
+def tunnelAar = file('libs/hev-socks5-tunnel-2.19.1.aar')
+tasks.register('verifyTunnel') {
+    inputs.file(tunnelAar)
+    doLast {
+        if (!tunnelAar.exists()) throw new GradleException('Run scripts/bootstrap-android.ps1 first (pinned VPN AAR).')
+        def actual = java.security.MessageDigest.getInstance('SHA-256').digest(tunnelAar.bytes).encodeHex().toString()
+        if (actual != '107958f7a07051386248ba8dba778b63d8dcefdfb2c3665b0ee9a8c93de5f6ca') {
+            throw new GradleException('VPN AAR SHA-256 mismatch. Refusing unverified native code.')
+        }
+    }
+}
+tasks.named('preBuild').configure { dependsOn 'verifyTunnel' }
+
+dependencies {
+    implementation 'com.google.android.material:material:1.13.0'
+    implementation files(tunnelAar)
+}

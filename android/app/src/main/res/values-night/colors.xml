@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="farm_surface">#15231F</color>
+    <color name="farm_ink">#DCEAE4</color>
+    <color name="farm_card">#20332C</color>
+    <color name="farm_muted">#AEC4BA</color>
+    <color name="farm_accent">#9BCDB7</color>
+    <color name="farm_tint">#2D4C3F</color>
+    <bool name="light_system_bars">false</bool>
+</resources>
