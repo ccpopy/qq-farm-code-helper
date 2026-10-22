@@ -76,6 +76,11 @@ pub async fn get_captured_code(core: State<'_, Arc<AppCore>>) -> Result<String, 
 }
 
 #[tauri::command]
+pub async fn open_capture_directory(core: State<'_, Arc<AppCore>>) -> Result<(), String> {
+    core.open_capture_directory().await
+}
+
+#[tauri::command]
 pub async fn detect_local_qqs(
     core: State<'_, Arc<AppCore>>,
 ) -> Result<Vec<LocalQqIdentity>, String> {

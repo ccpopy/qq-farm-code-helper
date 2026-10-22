@@ -24,7 +24,7 @@
         <h1>Code 获取助手</h1>
         <p class="brand-subtitle">从 Windows QQ 获取农场登录 Code</p>
       </div>
-      <button class="version-chip" id="versionChip" type="button" aria-label="应用版本">v0.2.7</button>
+      <button class="version-chip" id="versionChip" type="button" aria-label="应用版本">v0.2.8</button>
     </div>
   </header>
 
@@ -45,6 +45,16 @@
               <span id="startButtonText">启动代理</span>
             </button>
             <button class="secondary-action hidden" id="stopButton" type="button" disabled>停止并恢复网络</button>
+          </div>
+          <div class="capture-directory hidden" id="captureDirectory">
+            <div class="capture-directory-heading">
+              <span id="captureDirectoryLabel">日志目录</span>
+              <div class="capture-directory-actions">
+                <button class="secondary-action" id="copyCaptureDirectoryButton" type="button">复制路径</button>
+                <button class="secondary-action" id="openCaptureDirectoryButton" type="button">打开目录</button>
+              </div>
+            </div>
+            <code id="captureDirectoryPath" aria-labelledby="captureDirectoryLabel" tabindex="0"></code>
           </div>
           <div class="protocol-flow hidden" id="protocolFlow" aria-label="协议模式流程">
             <div><span>01</span><strong>代理端口</strong><small id="protocolFlowPort">8899</small></div>
@@ -158,7 +168,7 @@
                 <p class="section-label">APP UPDATE</p>
                 <h2 id="updateHeading">应用更新</h2>
               </div>
-              <span class="update-version" id="updateVersion">v0.2.7</span>
+              <span class="update-version" id="updateVersion">v0.2.8</span>
             </div>
             <p class="update-status" id="updateStatus" aria-live="polite">启动后自动检查 GitHub Release，也可以手动检查。</p>
             <p class="update-target" id="updateTarget">更新会保留当前程序所在目录。</p>

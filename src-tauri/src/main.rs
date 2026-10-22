@@ -97,6 +97,7 @@ fn main() {
             commands::stop_capture,
             commands::cleanup_network,
             commands::get_captured_code,
+            commands::open_capture_directory,
             commands::detect_local_qqs,
             commands::sync_account,
             commands::cancel_account_sync,

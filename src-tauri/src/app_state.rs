@@ -304,9 +304,10 @@ impl AppCore {
             StatusPayload::new(
                 "protocol_listening",
                 "协议模式",
-                protocol_listening_detail(settings.proxy_port, session.directory()),
+                protocol_listening_detail(settings.proxy_port),
                 false,
-            ),
+            )
+            .with_capture_directory(session.directory()),
         )
         .await;
         Ok(())
@@ -350,6 +351,7 @@ impl AppCore {
                 protocol_capture_completion_detail(&summary, "网络已恢复"),
                 false,
             )
+            .with_capture_directory(&summary.directory)
         } else {
             StatusPayload::new("stopped", "已停止", "网络已恢复", self.has_code().await)
         };
@@ -369,6 +371,7 @@ impl AppCore {
                 protocol_capture_completion_detail(&summary, "网络已清理"),
                 false,
             )
+            .with_capture_directory(&summary.directory)
         } else {
             StatusPayload::new(
                 "idle",
@@ -388,6 +391,20 @@ impl AppCore {
             .last_code
             .clone()
             .ok_or_else(|| "当前没有可复制的 Code".to_owned())
+    }
+
+    pub async fn open_capture_directory(&self) -> Result<(), String> {
+        let directory = self
+            .runtime
+            .lock()
+            .await
+            .status
+            .capture_directory
+            .clone()
+            .ok_or_else(|| "当前没有可打开的日志目录".to_owned())?;
+        tokio::task::spawn_blocking(move || crate::windows::open_directory(Path::new(&directory)))
+            .await
+            .map_err(|error| format!("打开日志目录失败: {error}"))?
     }
 
     pub async fn shutdown(&self) {
@@ -976,17 +993,16 @@ fn waiting_login_detail(identity: &LocalQqIdentity, hint: &str) -> String {
     format!("QQ {}（{nickname}）\n{hint}", identity.qq_number)
 }
 
-fn protocol_listening_detail(proxy_port: u16, directory: &Path) -> String {
-    format!("代理端口 {proxy_port}\n日志目录 {}", directory.display())
+fn protocol_listening_detail(proxy_port: u16) -> String {
+    format!("代理端口 {proxy_port}")
 }
 
 fn protocol_capture_completion_detail(summary: &CaptureSummary, network_result: &str) -> String {
     format!(
-        "{network_result} · {} 个连接 · {} 条消息 · {}\n日志目录 {}",
+        "{network_result} · {} 个连接 · {} 条消息 · {}",
         summary.connection_count,
         summary.message_count,
-        readable_bytes(summary.total_bytes),
-        summary.directory.display()
+        readable_bytes(summary.total_bytes)
     )
 }
 
@@ -1163,13 +1179,21 @@ mod tests {
 
     #[test]
     fn protocol_listening_copy_reports_the_port_and_session_directory() {
-        let directory = Path::new("protocol-captures").join("session-123");
-
-        let detail = protocol_listening_detail(8899, &directory);
-
+        let directory = Path::new("中文目录 with spaces")
+            .join("protocol-captures")
+            .join("session-123");
+        let status = StatusPayload::new(
+            "protocol_listening",
+            "协议模式",
+            protocol_listening_detail(8899),
+            false,
+        )
+        .with_capture_directory(&directory);
+        let payload = serde_json::to_value(status).unwrap();
+        assert_eq!(payload["detail"], "代理端口 8899");
         assert_eq!(
-            detail,
-            format!("代理端口 8899\n日志目录 {}", directory.display())
+            payload["capture_directory"],
+            directory.to_string_lossy().as_ref()
         );
     }
 
@@ -1184,13 +1208,12 @@ mod tests {
         };
 
         let detail = protocol_capture_completion_detail(&summary, "网络已恢复");
-
+        let status = StatusPayload::new("stopped", "协议模式已停止", detail, false)
+            .with_capture_directory(&summary.directory);
+        assert_eq!(status.detail, "网络已恢复 · 2 个连接 · 17 条消息 · 2.0 KiB");
         assert_eq!(
-            detail,
-            format!(
-                "网络已恢复 · 2 个连接 · 17 条消息 · 2.0 KiB\n日志目录 {}",
-                directory.display()
-            )
+            status.capture_directory.as_deref(),
+            Some(directory.to_string_lossy().as_ref())
         );
     }
 

@@ -6,11 +6,15 @@ const elements = {
   accountsCard: document.querySelector('#accountsCard'),
   accountsCount: document.querySelector('#accountsCount'),
   autoSync: document.querySelector('#autoSync'),
+  captureDirectory: document.querySelector('#captureDirectory'),
+  captureDirectoryPath: document.querySelector('#captureDirectoryPath'),
+  copyCaptureDirectoryButton: document.querySelector('#copyCaptureDirectoryButton'),
   cleanupButton: document.querySelector('#cleanupButton'),
   checkUpdateButton: document.querySelector('#checkUpdateButton'),
   detectQqButton: document.querySelector('#detectQqButton'),
   inlineMessage: document.querySelector('#inlineMessage'),
   installUpdateButton: document.querySelector('#installUpdateButton'),
+  openCaptureDirectoryButton: document.querySelector('#openCaptureDirectoryButton'),
   plotEmpty: document.querySelector('#plotEmpty'),
   plotEmptyDetail: document.querySelector('#plotEmptyDetail'),
   plotEmptyTitle: document.querySelector('#plotEmptyTitle'),
@@ -55,6 +59,7 @@ const identityPollInterval = 2000
 const protocolUnlockTarget = 5
 
 let currentPhase = 'idle'
+let currentCaptureDirectory = ''
 let currentSession = { active: false, target: null, detail: '' }
 let currentIdentityCandidates = []
 let currentIdentityError = ''
@@ -803,6 +808,10 @@ function renderStatus(status, { notify = false } = {}) {
   const copy = sessionCopy(status)
   elements.statusTitle.textContent = copy.title
   elements.statusDetail.textContent = copy.detail
+  currentCaptureDirectory = status.capture_directory || ''
+  elements.captureDirectory.classList.toggle('hidden', !currentCaptureDirectory)
+  elements.captureDirectoryPath.textContent = currentCaptureDirectory
+  elements.captureDirectoryPath.title = currentCaptureDirectory
   elements.statusSignal.className = `status-signal ${isActive ? 'active' : ''} ${isError && !isActive ? 'error' : ''}`
   elements.sessionCard.classList.toggle('running', isActive)
   renderAccounts()
@@ -960,6 +969,33 @@ async function copyCode() {
   }
 }
 
+async function copyCaptureDirectory() {
+  if (!currentCaptureDirectory)
+    return
+  try {
+    await navigator.clipboard.writeText(currentCaptureDirectory)
+    showToast('完整日志路径已复制。', { type: 'success', title: '复制成功', id: 'capture-directory' })
+  }
+  catch (error) {
+    showToast(String(error), { type: 'error', title: '复制路径失败' })
+  }
+}
+
+async function openCaptureDirectory() {
+  if (!currentCaptureDirectory)
+    return
+  setBusy(elements.openCaptureDirectoryButton, true, '打开中…')
+  try {
+    await invoke('open_capture_directory')
+  }
+  catch (error) {
+    showToast(String(error), { type: 'error', title: '打开目录失败' })
+  }
+  finally {
+    setBusy(elements.openCaptureDirectoryButton, false)
+  }
+}
+
 function identityByQqNumber(qqNumber) {
   return currentIdentityCandidates.find(identity => identity.qqNumber === qqNumber) || null
 }
@@ -1033,6 +1069,8 @@ async function bootstrap() {
 elements.saveButton.addEventListener('click', saveSettings)
 elements.testButton.addEventListener('click', testConnection)
 elements.startButton.addEventListener('click', startCapture)
+elements.copyCaptureDirectoryButton.addEventListener('click', copyCaptureDirectory)
+elements.openCaptureDirectoryButton.addEventListener('click', openCaptureDirectory)
 elements.stopButton.addEventListener('click', stopCapture)
 elements.cleanupButton.addEventListener('click', cleanupNetwork)
 elements.checkUpdateButton.addEventListener('click', () => checkForUpdate())

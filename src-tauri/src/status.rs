@@ -1,5 +1,6 @@
 use crate::server_sync::AccountProfile;
 use serde::Serialize;
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusPayload {
@@ -12,6 +13,8 @@ pub struct StatusPayload {
     pub session_active: bool,
     /// 当前状态所属的 QQ 号，供前端把结果记到对应账号行。
     pub target_qq: Option<String>,
+    /// 协议会话的完整目录，独立于状态文案展示及复制。
+    pub capture_directory: Option<String>,
 }
 
 impl StatusPayload {
@@ -38,11 +41,17 @@ impl StatusPayload {
             profile: None,
             session_active: false,
             target_qq: None,
+            capture_directory: None,
         }
     }
 
     pub fn with_profile(mut self, profile: AccountProfile) -> Self {
         self.profile = Some(profile);
+        self
+    }
+
+    pub fn with_capture_directory(mut self, directory: &Path) -> Self {
+        self.capture_directory = Some(directory.to_string_lossy().into_owned());
         self
     }
 }

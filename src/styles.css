@@ -258,6 +258,12 @@ button:focus-visible, .switch-field input:focus-visible + i, .protocol-toggle in
 .session-side { display: flex; align-items: center; gap: 10px; }
 .session-tally { padding: 5px 9px; color: #39733a; border: 1px solid #c6dcb5; border-radius: 999px; background: #eaf4df; font: 700 10px Bahnschrift, sans-serif; letter-spacing: 0.03em; white-space: nowrap; }
 .session-side .secondary-action, .session-side .primary-action { font-size: 12px; }
+.capture-directory { grid-column: 1 / -1; min-width: 0; margin-top: 10px; padding: 10px 12px; border: 1px solid #e5d9c1; border-radius: 10px; background: rgba(255, 253, 247, 0.8); }
+.capture-directory-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; color: #77755f; font-size: 11px; font-weight: 700; }
+.capture-directory-actions { display: flex; gap: 8px; }
+.capture-directory-actions .secondary-action { min-height: 30px; padding: 5px 10px; font-size: 11px; font-weight: 400; }
+.capture-directory code { display: block; margin-top: 8px; color: #595c4c; font: 12px/1.7 Consolas, "Microsoft YaHei UI", monospace; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.capture-directory code:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
 .session-card .protocol-flow { grid-column: 1 / -1; margin: 12px 0 0; }
 .status-signal { display: grid; place-items: center; width: 15px; height: 15px; border: 1px solid #c8c8bd; border-radius: 50%; background: #f6f4ec; }
 .status-signal span { width: 6px; height: 6px; border-radius: 50%; background: #aaa99f; }
