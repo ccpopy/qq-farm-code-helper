@@ -13,6 +13,7 @@ import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
+import org.json.JSONObject;
 
 public final class SettingsStore {
     private static final String KEY = "farmhelper.settings.aes.v1";
@@ -53,6 +54,8 @@ public final class SettingsStore {
     /** Screenshots and screen recording are blocked unless the user explicitly allows them. */
     public boolean allowScreenshots() { return prefs.getBoolean("allowScreenshots", false); }
     public void allowScreenshots(boolean allowed) { prefs.edit().putBoolean("allowScreenshots", allowed).apply(); }
+    public boolean overlayEnabled() { return prefs.getBoolean("overlayEnabled", false); }
+    public void overlayEnabled(boolean enabled) { prefs.edit().putBoolean("overlayEnabled", enabled).apply(); }
     public boolean accelerated() { return prefs.getBoolean("accelerated", true); }
     public String mirror() { return prefs.getString("mirror", "https://ghfast.top"); }
     public String targetId() { return prefs.getString("targetId", ""); }
@@ -65,6 +68,30 @@ public final class SettingsStore {
     public void target(ApiClient.Account account) {
         prefs.edit().putString("targetId", account.id).putString("targetName", account.name).putString("targetGid", account.gid)
                 .putString("targetPlatform", account.platform).apply();
+    }
+    /** A user-confirmed destination is local to this server and this account incarnation. */
+    public synchronized String rememberedGid(String connection, ApiClient.Account account) {
+        if (!connection.equals(connectionId()) || account.uuid.isEmpty()) return "";
+        try {
+            JSONObject entry = new JSONObject(prefs.getString("accountIdentities", "{}")).optJSONObject(account.id);
+            if (entry == null || !account.uuid.equals(entry.optString("uuid"))
+                    || !account.platform.equals(entry.optString("platform")) || !account.qq.equals(entry.optString("qq"))) return "";
+            return AccountIdentity.gid(entry.optString("gid"));
+        } catch (Exception invalid) { return ""; }
+    }
+    public synchronized void rememberIdentity(String connection, ApiClient.Account account, AppState.Capture capture) {
+        if (!connection.equals(connectionId()) || !account.platform.equals(capture.platform().id)) return;
+        try {
+            JSONObject entries;
+            try { entries = new JSONObject(prefs.getString("accountIdentities", "{}")); }
+            catch (Exception invalid) { entries = new JSONObject(); }
+            // A Code-only replacement must invalidate a previous association, not silently reuse it.
+            entries.remove(account.id);
+            String gid = AccountIdentity.gid(capture.ownGid());
+            if (!account.uuid.isEmpty() && !gid.isEmpty()) entries.put(account.id, new JSONObject()
+                    .put("uuid", account.uuid).put("platform", account.platform).put("qq", account.qq).put("gid", gid));
+            prefs.edit().putString("accountIdentities", entries.toString()).apply();
+        } catch (Exception invalid) { /* Identity suggestions must not turn an accepted push into a failed one. */ }
     }
     public void options(boolean friends, boolean accelerated, String mirror, int seconds) {
         prefs.edit().putBoolean(friendCaptureKey(), friends).putBoolean("accelerated", accelerated)
@@ -100,13 +127,13 @@ public final class SettingsStore {
         SharedPreferences.Editor edit = prefs.edit().putString("server", base).putBoolean("allowHttp", http)
                 .putString("tokenCipher", Base64.encodeToString(data, Base64.NO_WRAP));
         if (changed) edit.putString("connectionId", java.util.UUID.randomUUID().toString())
-                .remove("targetId").remove("targetName").remove("targetGid").remove("targetPlatform").remove("monitoredIds");
+                .remove("targetId").remove("targetName").remove("targetGid").remove("targetPlatform").remove("monitoredIds").remove("accountIdentities");
         if (!edit.commit()) throw new IllegalStateException("保存设置失败");
         return changed;
     }
     public synchronized void forgetServer() {
         prefs.edit().remove("server").remove("tokenCipher").remove("allowHttp").remove("connectionId")
-                .remove("targetId").remove("targetName").remove("targetGid").remove("targetPlatform").remove("monitoredIds").apply();
+                .remove("targetId").remove("targetName").remove("targetGid").remove("targetPlatform").remove("monitoredIds").remove("accountIdentities").apply();
     }
     private SecretKey key() throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore");

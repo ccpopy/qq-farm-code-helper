@@ -164,7 +164,7 @@ public final class WxLoginActivity extends AppCompatActivity {
                 List<ApiClient.Account> accounts = new ArrayList<>();
                 for (ApiClient.Account account : client.accounts()) if (account.platform.equals("wx")) accounts.add(account);
                 String[] labels = new String[accounts.size() + 1]; labels[0] = "＋ 新增账号";
-                for (int i = 0; i < accounts.size(); i++) labels[i + 1] = accounts.get(i).name + "（ID " + accounts.get(i).id + "）";
+                for (int i = 0; i < accounts.size(); i++) labels[i + 1] = accounts.get(i).selectionLabel();
                 runOnUiThread(() -> {
                     if (isFinishing() || isDestroyed() || !model.canStart() || !client.isCurrent()) return;
                     new MaterialAlertDialogBuilder(this).setTitle("登录到").setItems(labels, (dialog, which) -> {

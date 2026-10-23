@@ -1,8 +1,8 @@
 # 农场助手 Android
 
 原生 Java / Material Components Android 应用，不依赖 Android Studio。
-当前正式版本为 `0.1.0`（`versionCode 1000`），支持 Android 10 及以上。
-[下载 Android 正式版](https://github.com/ccpopy/qq-farm-code-helper/releases/tag/android-v0.1.0)，
+当前正式版本为 `0.1.1`（`versionCode 1001`），支持 Android 10 及以上。
+[下载 Android 正式版](https://github.com/ccpopy/qq-farm-code-helper/releases/tag/android-v0.1.1)，
 使用说明及限制见下文和 [Android 更新日志](CHANGELOG.md)。
 
 ## 构建与覆盖安装
@@ -15,7 +15,7 @@
 ```powershell
 .\scripts\build-android.ps1 -JdkDirectory $env:JAVA_HOME -SdkDirectory $env:ANDROID_HOME
 .\scripts\build-android.ps1 -Install -DeviceSerial <已授权设备序列号> -AdbPath <adb路径>
-.\scripts\build-android.ps1 -Configuration Release -Version 0.1.0 -Bundle
+.\scripts\build-android.ps1 -Configuration Release -Version 0.1.1 -Bundle
 ```
 
 脚本验证固定的 hev-socks5-tunnel 2.19.1 AAR 的 SHA-256，并从固定提交和子模块构建
@@ -44,9 +44,14 @@ Gradle 校验私钥存在、证书指纹和包名，构建脚本再次检查 APK
 
 - 获取页顶部切换 QQ / 微信。QQ 使用中央按钮启动或停止 VPN 获取；微信默认是扫码登录，
   可改用实验性的 VPN 获取。缺少服务器配置或证书时页面顶部给出入口，证书在设置页“抓包证书”中管理。
-- 获取结束后（或手动导入后）按设置自动比对服务器同平台账号：自身 GID 相同的账号提示“检测到已有账号”，
+- 收到身份或好友数据后（或手动导入后）按设置自动比对服务器同平台账号：自身 GID 相同的账号提示“检测到已有账号”，
   其次提示上次推送的账号；否则由用户选择新增或覆盖已有账号。任何写入都需要用户确认。
   推送内容（Code、好友）和是否自动比对在设置页“推送”中开关，默认全部开启。推送 Code 后自动检查账号是否上线。
+- 设置页开启“悬浮窗”并允许系统的“显示在其他应用上层”权限后，VPN 运行时可在 QQ 中查看结果、
+  选择账号并推送，也可新增账号、清除结果继续换号。悬浮窗可拖动和收起，关闭悬浮窗不停止 VPN。
+- 账号列表和推送确认优先显示服务器已有的 QQ 号（`uin` / `qq`），不把服务器内部 ID 或农场 GID 当作 QQ 号。
+  当前后台账号列表不提供自身 GID；首次选择账号成功同步 Code 后，助手在本机记录对应关系，后续同一 GID 可匹配。
+  绑定按服务器、账号 UUID、平台及 QQ 号隔离；只有 Code 没有身份时仍需选择或确认目标账号。无需修改 main 后台。
 - 账号页自动读取服务器账号并逐个检查在线状态。“掉线提醒”开关与账号选择相互独立：铃铛或“全选”选择账号，
   开关开启且至少选中一个账号时才运行提醒服务；未选择账号等同于不提醒。通知栏“停止”会同时关闭开关。
 - 设置页“允许截图”默认关闭（`FLAG_SECURE`，截屏与录屏为黑色）；开启后应用画面可正常截屏。
@@ -58,8 +63,9 @@ Gradle 校验私钥存在、证书指纹和包名，构建脚本再次检查 APK
    不修改 QQ / 微信、不 root、不绕过证书固定或 TLS 校验。
 4. 用户授权 VPN 后，仅将所选应用的新 TCP/UDP 流量送入本机转发，包括 DNS；
    不按固定网关 IP 筛选入口，不要求重启 QQ / 微信。获取模式只解密精确的农场目标 SNI，
-   其他连接原样转发。VPN 不设运行总时限；获取完成、手动停止或系统撤销授权时结束。
-   等待好友回包不设倒计时；Code 先存入内存，手动停止仍保留已取得的结果。
+   其他连接原样转发。VPN 不设运行总时限；获取完成、推送和清除结果均不结束 VPN。
+   手动停止、系统撤销授权或其他 VPN 接管时结束；系统结束应用进程也会中止服务。
+   好友分批到达即可同步已收到的部分，后续回包继续补充待同步好友。清除结果后进入下一轮，不接收上一轮迟到数据。
 5. Wi-Fi 可能只有 IPv4，蜂窝网络也不保证支持 IPv6。以当前默认互联网连接为准，
    检测 IPv6 地址及默认路由，跟随网络变化重新配置路由、DNS、MTU 和受保护套接字。
    不强制开关 Wi-Fi、移动数据，也不主动选用备用蜂窝网络。
@@ -130,7 +136,7 @@ Gradle 校验私钥存在、证书指纹和包名，构建脚本再次检查 APK
 - 对照 [qq-farm-evolution 好友提取器](https://github.com/Xb-Fishing/qq-farm-evolution/blob/main/core/src/capture/friend-extractor.js)
   和 [好友协议](https://github.com/Xb-Fishing/qq-farm-evolution/blob/main/core/src/proto/friendpb.proto)，
   补充 `FriendService.GetAll`；`GetAll` / `SyncAll` 作为完整快照，`GetGameFriends` 作为分批结果合并。
-  分批结果实时保留，只有完整快照且取得自身 GID 后才自动结束；也可手动停止保留已收到的数据。
+  分批结果实时保留并允许同步；0.1.1 起完整快照不再结束 VPN，后续数据仍可继续同步。
   只读取 `GameFriend.gid`，不将 `open_id`、`authorized_status` 或好友申请中的值当作好友 GID。
   登录 URL 按百分号编码解码，保留 Code 中的字面 `+`，不按表单空格解码。
 - 参考 [ProxyPin #747 对应修复](https://github.com/wanghongenpin/proxypin/commit/120d825ba972b373294ba3ed6294782815af0734)，
@@ -171,7 +177,7 @@ TLS 主机元数据仅限本次内存，不包含路径、参数或正文，不�
   的总时长。保留按应用接管、回环代理认证、证书与主机名验证、凭据过期及解析缓冲边界。
   更新包的大小、签名和摘要检查，以及 API 响应大小和日志容量限制仍用于防止内存耗尽或
   凭据暴露，不参与 QQ 流量准入。仅 Code 模式仍会中止该次官方登录，避免先消费 Code；
-  获取完成后停止 VPN 的既有流程也保留，透传诊断不会触发这两个动作。
+  0.1.1 起获取完成后保持 VPN，清除结果可开始下一轮；透传诊断不获取凭据。
 - 原生 TCP 的 300 秒和 UDP 的 60 秒空闲回收也已禁用。应用明确配置
   `tcp-read-write-timeout: 0` 和 `udp-read-write-timeout: 0`；本地补丁使解析器接受 0，
   转换为核心已有的 `-1` 无限 I/O 等待。停止会话仍使用 0 并唤醒任务，因此手动停止、

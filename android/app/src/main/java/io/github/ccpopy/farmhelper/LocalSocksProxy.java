@@ -17,7 +17,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLContext;
@@ -39,7 +38,6 @@ public final class LocalSocksProxy implements AutoCloseable {
     // Relays block while a connection is idle. A fixed pool or admission count
     // would reject unrelated QQ connections merely because others remain open.
     private final ExecutorService workers = Executors.newCachedThreadPool();
-    private final AtomicBoolean claimed = new AtomicBoolean();
     private final SocksUdpRelay udp;
     private volatile boolean active = true;
     private static final class StageFailure extends IOException {
@@ -61,10 +59,11 @@ public final class LocalSocksProxy implements AutoCloseable {
         while (active) try {
             Socket socket = listener.accept();
             AppState.socksAccepted++;
+            long acceptedEpoch = AppState.captureEpoch();
             sockets.add(socket);
             if (!active) { closeSocket(socket); continue; }
             try { workers.execute(() -> {
-                try { socket.setSoTimeout(15_000); socket.setTcpNoDelay(true); handle(socket); }
+                try { socket.setSoTimeout(15_000); socket.setTcpNoDelay(true); handle(socket, acceptedEpoch); }
                 catch (Exception e) { if (active) {
                     Throwable cause = e.getCause() == null ? e : e.getCause();
                     String kind = cause instanceof javax.net.ssl.SSLHandshakeException ? "tls_handshake" :
@@ -78,7 +77,7 @@ public final class LocalSocksProxy implements AutoCloseable {
             }); } catch (java.util.concurrent.RejectedExecutionException stopped) { closeSocket(socket); }
         } catch (Exception e) { if (active) AppState.log("代理", "本地连接失败"); }
     }
-    private void handle(Socket client) throws Exception {
+    private void handle(Socket client, long acceptedEpoch) throws Exception {
         InputStream input = client.getInputStream(); OutputStream output = client.getOutputStream();
         byte[] greeting = TlsHello.exact(input, 2);
         if (greeting[0] != 5 || (greeting[1] & 255) == 0) return;
@@ -158,15 +157,22 @@ public final class LocalSocksProxy implements AutoCloseable {
                 if (first.length == 3 && first[0].equals("GET") && header(text, "upgrade").equalsIgnoreCase("websocket"))
                     code = UrlPolicy.captureCode(first[1], hostName(header(text, "host")));
             } catch (IllegalArgumentException ignored) { /* Non-login farm traffic is forwarded without parsing. */ }
-            boolean inspect = code != null && claimed.compareAndSet(false, true);
+            AppState.Capture candidate = code == null ? null : new AppState.Capture(code, "", Collections.emptyList(), android.os.SystemClock.elapsedRealtime(), false);
+            boolean inspect = candidate != null && AppState.claimNetworkCapture(acceptedEpoch, candidate.generation());
             if (inspect && !captureFriends) {
-                decrypted.getOutputStream().write("HTTP/1.1 451 Unavailable For Legal Reasons\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
-                decrypted.getOutputStream().flush();
-                result.accept(new AppState.Capture(code, "", Collections.emptyList(), android.os.SystemClock.elapsedRealtime(), false), true);
+                try {
+                    decrypted.getOutputStream().write("HTTP/1.1 451 Unavailable For Legal Reasons\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+                    decrypted.getOutputStream().flush();
+                    result.accept(candidate, true);
+                } catch (Exception error) { AppState.releaseUnpublishedCapture(candidate.generation()); throw error; }
                 return;
             }
-            AppState.Capture pending = inspect ? new AppState.Capture(code, "", Collections.emptyList(), android.os.SystemClock.elapsedRealtime(), false) : null;
+            AppState.Capture pending = inspect ? candidate : null;
             if (pending != null) result.accept(pending, false);
+            // Replies only carry identity/friend deltas. The short-lived Code is
+            // owned by AppState, rather than retained by a long-lived relay.
+            if (pending != null) pending = pending.withoutCode();
+            candidate = null; code = null; text = null; first = null;
             relayTls(decrypted, server, requestHeaders, pending);
         }
         }
@@ -237,37 +243,38 @@ public final class LocalSocksProxy implements AutoCloseable {
         }
     }
     private void relayTls(SSLSocket client, SSLSocket server, byte[] request, AppState.Capture pending) throws Exception {
-        WsInspector inspector = new WsInspector(); AtomicBoolean delivered = new AtomicBoolean();
+        WsInspector inspector = new WsInspector();
         Runnable finish = () -> {
-            if (pending == null || !active || !delivered.compareAndSet(false, true)) return;
+            if (pending == null || !active || !AppState.acceptsNetworkCapture(pending.generation())) return;
             synchronized (inspector) {
                 if (!inspector.friendsObserved) AppState.log("抓取", "尚未观察到成功的好友回包；不会伪报好友同步成功");
                 else if (!inspector.friendsComplete) AppState.log("抓取", "仅收到分批好友回包，已保留实际读取的 GID；尚未确认完整列表");
-                result.accept(new AppState.Capture(pending.code(), inspector.ownGid, inspector.gids(), pending.createdAt(), inspector.friendsObserved, pending.generation()), true);
+                result.accept(new AppState.Capture("", inspector.ownGid, inspector.gids(), pending.createdAt(), inspector.friendsObserved, pending.generation()), true);
             }
         };
         try {
             String clean = new String(request, StandardCharsets.ISO_8859_1).replaceAll("(?im)^Sec-WebSocket-Extensions:[^\r\n]*\r\n", "");
             server.getOutputStream().write(clean.getBytes(StandardCharsets.ISO_8859_1)); server.getOutputStream().flush();
+            java.util.Arrays.fill(request, (byte)0); clean = null;
             byte[] response;
             try { response = readHeaders(server.getInputStream()); } catch (Exception error) { throw new StageFailure("upstream_http", error); }
             client.getOutputStream().write(response); client.getOutputStream().flush();
             if (pending != null) {
-                if (!new String(response, StandardCharsets.ISO_8859_1).startsWith("HTTP/1.1 101 ")) { finish.run(); return; }
-                AppState.log("抓取", "已连接农场，等待官方登录和好友回包；可随时手动停止并保留已取得的结果");
+                if (!new String(response, StandardCharsets.ISO_8859_1).startsWith("HTTP/1.1 101 ")) return;
+                AppState.log("抓取", "已连接农场，收到的 Code 和好友可立即同步；VPN 保持运行，清除结果可继续换号获取");
             }
             client.setSoTimeout(0); server.setSoTimeout(0);
             workers.execute(() -> copyQuietly(client, server));
             copy(server.getInputStream(), client.getOutputStream(), pending == null ? null : (bytes, length) -> {
                 synchronized (inspector) {
+                    if (!AppState.acceptsNetworkCapture(pending.generation())) return;
                     long revision = inspector.revision();
                     inspector.feed(bytes, 0, length);
-                    if (inspector.friendsComplete && !inspector.ownGid.isEmpty()) finish.run();
-                    else if (inspector.revision() != revision && !delivered.get())
-                        result.accept(new AppState.Capture(pending.code(), inspector.ownGid, inspector.gids(), pending.createdAt(), inspector.friendsObserved, pending.generation()), false);
+                    if (inspector.revision() != revision)
+                        result.accept(new AppState.Capture("", inspector.ownGid, inspector.gids(), pending.createdAt(), inspector.friendsObserved, pending.generation()), inspector.friendsComplete);
                 }
             });
-        } finally { finish.run(); }
+        } finally { java.util.Arrays.fill(request, (byte)0); finish.run(); }
     }
     private interface Observer { void accept(byte[] bytes, int length); }
     private void copy(InputStream input, OutputStream output, Observer observer) throws IOException {

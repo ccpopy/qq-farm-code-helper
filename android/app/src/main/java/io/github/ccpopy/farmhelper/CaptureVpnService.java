@@ -21,7 +21,7 @@ public final class CaptureVpnService extends VpnService {
     private volatile boolean active;
     private boolean stopping;
     private boolean coreConfirmed;
-    private int generation;
+    private volatile int generation;
     private volatile UnderlyingNetworkMonitor networks;
     private UnderlyingNetworkMonitor.Profile configuredNetwork;
     private CertificateManager certificates;
@@ -30,6 +30,14 @@ public final class CaptureVpnService extends VpnService {
     private ParcelFileDescriptor tunnel;
     private CapturePlatform platform;
     private boolean captureFriends;
+    private CaptureOverlay overlay;
+    private long notifiedCapture;
+    private int recoveryAttempt, recoveryToken;
+    private boolean recoveryScheduled;
+    @Override public void onCreate() {
+        super.onCreate();
+        overlay = new CaptureOverlay(this);
+    }
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null || "STOP".equals(intent.getAction())) { stopCapture(); return START_NOT_STICKY; }
         if (active || stopping) return START_NOT_STICKY;
@@ -60,9 +68,12 @@ public final class CaptureVpnService extends VpnService {
             password = android.util.Base64.encodeToString(random, android.util.Base64.NO_WRAP);
             if (!active) return;
             var profile = networks.current();
-            if (profile == null) throw new IllegalStateException("没有底层互联网连接");
+            if (profile == null) {
+                AppState.status = "等待底层网络恢复"; AppState.changed(); return;
+            }
             configure(profile);
         } catch (Throwable error) {
+            if (active && password != null && networks != null) { scheduleRecovery("VPN 转发准备尚未完成"); return; }
             AppState.status = "VPN 未能启动";
             AppState.log("VPN", "准备失败：请检查 " + platform.label + " 是否安装、本地证书及网络；不会修改系统证书");
             stopCapture();
@@ -79,46 +90,34 @@ public final class CaptureVpnService extends VpnService {
         try {
             AppState.log("VPN", "底层网络已变化，重新配置路由、DNS 和受保护连接；无需重启 " + platform.label);
             AppState.captureReady = false; AppState.changed();
-            closeForwarding();
+            closeForwarding(true);
             configure(profile);
         } catch (Throwable error) {
-            AppState.status = "VPN 未能启动";
-            AppState.log("VPN", "网络切换后重建失败，正在停止 VPN 恢复网络"); stopCapture();
+            scheduleRecovery("网络切换后转发重建未完成");
         }
     }
     private void configure(UnderlyingNetworkMonitor.Profile profile) throws Exception {
             if (!active) return;
+            recoveryScheduled = false; recoveryToken++;
             configuredNetwork = profile; coreConfirmed = false;
             int currentGeneration = ++generation;
             AppState.vpnIpv6 = profile.ipv6();
             AppState.log("VPN", "当前底层网络：IPv4" + (profile.ipv6() ? " / IPv6 双栈" : "；未检测到可用 IPv6")
                     + "，DNS 数量：" + profile.dns().size() + "，MTU：" + profile.mtu());
-            boolean[] resultStarted = {false}; // Accessed only by the main-thread callback.
-            proxy = new LocalSocksProxy(this, () -> networks == null ? null : networks.network(), certificates, password, captureFriends, AppState.capturePassthrough, this::stopCapture, (rawCapture, complete) -> main.post(() -> {
+            proxy = new LocalSocksProxy(this, () -> networks == null ? null : networks.network(), certificates, password, captureFriends, AppState.capturePassthrough,
+                    () -> ENGINE.execute(() -> scheduleRecovery("UDP 转发需要重建")), (rawCapture, complete) -> main.post(() -> {
                 if (!active || currentGeneration != generation) return;
                 // WeChat Codes are single-use. Friend inspection forwards the login;
                 // never present that already-forwarded Code as reusable credentials.
                 boolean friendsOnly = platform == CapturePlatform.WECHAT && captureFriends;
                 AppState.Capture captured = (friendsOnly ? rawCapture.withoutCode() : rawCapture).forPlatform(platform);
-                boolean saved = true;
-                if (!resultStarted[0]) { resultStarted[0] = true; AppState.captured(captured); }
-                else saved = AppState.completeCapture(captured);
-                if (!complete) {
-                    AppState.status = captured.friendsObserved()
-                            ? "已读取 " + captured.gids().size() + " 位好友 · 等待完整列表，可手动停止"
-                            : friendsOnly ? "农场已连接 · 等待好友回包，可手动停止" : "Code 已取得 · 等待好友回包，可手动停止";
-                    AppState.changed(); return;
+                if (!AppState.networkCaptured(captured, complete)) return;
+                if (notifiedCapture != captured.generation() && AppState.hasPendingCapture()
+                        && (complete || captured.friendsObserved() || !captured.ownGid().isEmpty())) {
+                    notifiedCapture = captured.generation();
+                    AppState.log("抓取", "已取得可同步结果；可立即推送，VPN 将继续接收好友，清除结果可换号获取");
+                    Notifications.alert(this, "", friendsOnly ? "好友已读取" : "农场凭据已获取", "可立即确认账号并推送；VPN 保持运行。");
                 }
-                if (!saved) {
-                    AppState.status = "抓取结束 · 结果已清除或过期";
-                    stopCapture(); return;
-                }
-                AppState.status = friendsOnly
-                        ? (captured.friendsObserved() ? "已读取 " + captured.gids().size() + " 位好友 · 本次不保留 Code" : "抓取结束 · 好友尚未取得")
-                        : captured.friendsObserved() ? "已获取 Code · " + captured.gids().size() + " 位好友" : "已获取 Code · 好友尚未取得";
-                AppState.log("抓取", "抓取结束，凭据仅保留在内存；请选择对应账号后推送");
-                Notifications.alert(this, "", friendsOnly ? "好友读取已结束" : "农场凭据已获取", "打开农场助手，确认账号后推送。");
-                main.postDelayed(this::stopCapture, 300);
             }));
             Builder builder = new Builder().setSession("农场助手 · 仅 " + platform.label + " 全量接管").setMtu(profile.mtu()).setMetered(profile.metered())
                     .addAddress("10.231.0.1", 32).allowFamily(OsConstants.AF_INET)
@@ -133,8 +132,11 @@ public final class CaptureVpnService extends VpnService {
             var path = new java.io.File(getFilesDir(), "tunnel.yml").toPath();
             Files.write(path, config.getBytes(StandardCharsets.UTF_8));
             if (!active) return;
-            tunnel = builder.establish();
-            if (tunnel == null) throw new IllegalStateException("VPN 授权已撤销");
+            ParcelFileDescriptor replacement = builder.establish();
+            if (replacement == null) throw new IllegalStateException("VPN 授权已撤销");
+            ParcelFileDescriptor previous = tunnel;
+            tunnel = replacement;
+            if (previous != null) try { previous.close(); } catch (Exception ignored) { }
             if (!TProxyService.TProxyStartService(path.toString(), tunnel.getFd())) throw new IllegalStateException("VPN 转发核心启动失败");
             if (!active) return;
             main.postDelayed(() -> ENGINE.execute(() -> checkCore(currentGeneration, 3)), 350);
@@ -143,20 +145,41 @@ public final class CaptureVpnService extends VpnService {
         if (!active || expectedGeneration != generation) return;
         if (!TProxyService.TProxyIsRunning()) {
             if (startupRetries > 0) { main.postDelayed(() -> ENGINE.execute(() -> checkCore(expectedGeneration, startupRetries - 1)), 350); return; }
-            AppState.status = "VPN 转发核心已退出";
-            AppState.log("VPN", "转发核心未保持运行，已停止接管网络；请导出脱敏日志排查兼容性");
-            AppState.changed(); stopCapture(); return;
+            scheduleRecovery("VPN 转发核心需要恢复"); return;
         }
+        recoveryAttempt = 0;
         sampleTraffic();
         AppState.changed();
-        if (!coreConfirmed && AppState.capture() == null) {
+        if (!coreConfirmed) {
             coreConfirmed = true;
             AppState.captureReady = true;
-            AppState.status = AppState.capturePassthrough ? platform.label + " 全量透传就绪 · 不获取凭据" : "等待进入 " + platform.label + " 农场";
+            AppState.status = AppState.capturePassthrough ? platform.label + " 全量透传就绪 · 不获取凭据" : AppState.captureSummary();
             AppState.log("VPN", "转发已就绪：按 " + platform.label + " 应用接管全部 TCP/UDP，不按 IP/域名筛选入口；"
                     + (AppState.capturePassthrough ? "本次仅透传，TLS 不解密，不获取凭据" : "仅农场目标 SNI 解密，其他内容原样透传")); AppState.changed();
         }
         main.postDelayed(() -> ENGINE.execute(() -> checkCore(expectedGeneration, 0)), 2000);
+    }
+    /** Transient forwarding failures rebuild the running session, never consume results. */
+    private void scheduleRecovery(String reason) {
+        if (!active || recoveryScheduled) return;
+        recoveryScheduled = true;
+        AppState.captureReady = false; AppState.captureCollecting = false;
+        int token = ++recoveryToken;
+        long delay = Math.min(30_000L, 1000L << Math.min(recoveryAttempt++, 5));
+        AppState.status = "VPN 转发正在恢复 · 已有结果仍可同步";
+        AppState.log("VPN", reason + "，将自动重试；无需停止获取或清除结果"); AppState.changed();
+        main.postDelayed(() -> ENGINE.execute(() -> {
+            if (!active || token != recoveryToken) return;
+            recoveryScheduled = false;
+            var profile = networks == null ? null : networks.current();
+            if (profile == null) {
+                configuredNetwork = null;
+                AppState.status = "等待底层网络恢复 · 已有结果仍可同步"; AppState.changed(); return;
+            }
+            closeForwarding(true);
+            try { configure(profile); }
+            catch (Throwable failure) { scheduleRecovery("VPN 转发重建尚未成功"); }
+        }), delay);
     }
     static void sampleTraffic() {
         long[] traffic = TProxyService.TProxyGetStats();
@@ -164,13 +187,19 @@ public final class CaptureVpnService extends VpnService {
             AppState.tunnelTxPackets = traffic[0]; AppState.tunnelRxPackets = traffic[2];
         }
     }
-    @Override public void onRevoke() { stopCapture(); }
-    private void closeForwarding() {
+    @Override public void onRevoke() {
+        AppState.status = "VPN 已被系统撤销或其他 VPN 接管";
+        stopCapture();
+    }
+    private void closeForwarding() { closeForwarding(false); }
+    private void closeForwarding(boolean keepTunnel) {
         ++generation;
         try { sampleTraffic(); } catch (Throwable ignored) { }
         try { TProxyService.TProxyStopService(); } catch (Throwable ignored) { }
         if (proxy != null) { proxy.close(); proxy = null; }
-        if (tunnel != null) { try { tunnel.close(); } catch (Exception ignored) { } tunnel = null; }
+        AppState.networkForwardingClosed();
+        if (!keepTunnel && tunnel != null) { try { tunnel.close(); } catch (Exception ignored) { } tunnel = null; }
+        AppState.captureCollecting = false;
     }
     // Android binds to an established VPN. stopSelf()/stopService() alone may
     // leave that binding alive, so onDestroy() cannot be our shutdown trigger.
@@ -180,7 +209,7 @@ public final class CaptureVpnService extends VpnService {
         if (stopping) return;
         stopping = true;
         active = false; main.removeCallbacksAndMessages(null);
-        AppState.captureReady = false;
+        AppState.captureReady = false; AppState.captureCollecting = false;
         ENGINE.execute(() -> {
             try {
                 if (networks != null) { networks.close(); networks = null; }
@@ -190,7 +219,8 @@ public final class CaptureVpnService extends VpnService {
                 try { Files.deleteIfExists(new java.io.File(getFilesDir(), "tunnel.yml").toPath()); } catch (Exception ignored) { }
                 main.post(() -> {
                     AppState.capturing = false;
-                    if (AppState.capture() == null && !AppState.status.equals("VPN 未能启动") && !AppState.status.equals("VPN 转发核心已退出")) AppState.status = "VPN 已停止";
+                    if (!AppState.status.equals("VPN 未能启动") && !AppState.status.equals("VPN 已被系统撤销或其他 VPN 接管"))
+                        AppState.status = AppState.capture() == null ? "VPN 已停止" : AppState.captureSummary();
                     AppState.log("VPN", "已停止抓取并释放网络；已安装的系统证书不会被自动删除");
                     stopForeground(STOP_FOREGROUND_REMOVE);
                     stopSelf();
@@ -199,6 +229,7 @@ public final class CaptureVpnService extends VpnService {
         });
     }
     @Override public void onDestroy() {
+        if (overlay != null) { overlay.close(); overlay = null; }
         stopCapture();
         super.onDestroy();
     }

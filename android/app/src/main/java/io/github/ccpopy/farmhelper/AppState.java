@@ -19,6 +19,8 @@ public final class AppState {
     public static SettingsStore settings;
     public static volatile boolean capturing;
     public static volatile boolean captureReady;
+    /** Receiving this round's replies; available results can still be submitted. */
+    public static volatile boolean captureCollecting;
     public static volatile boolean monitoring;
     public static volatile boolean tlsVerified;
     public static volatile int gatewayConnections, gatewayTlsAttempts;
@@ -65,6 +67,11 @@ public final class AppState {
     private static final CopyOnWriteArraySet<Runnable> listeners = new CopyOnWriteArraySet<>();
     private static final ArrayDeque<String> logs = new ArrayDeque<>();
     private static Capture capture;
+    private static long captureEpoch;
+    private static long networkCaptureGeneration;
+    private static boolean networkCapturePublished;
+    private static boolean captureCodeExpired;
+    private static final java.util.LinkedHashSet<String> consumedGids = new java.util.LinkedHashSet<>();
     private AppState() {}
     static void init(Context context) {
         settings = new SettingsStore(context);
@@ -86,35 +93,120 @@ public final class AppState {
         Capture withoutCode() { return new Capture("", ownGid, gids, createdAt, friendsObserved, generation, platform); }
     }
     public static synchronized Capture capture() {
-        if (capture != null && SystemClock.elapsedRealtime() - capture.createdAt > 300_000) capture = null;
+        if (capture != null && !capture.code.isEmpty() && SystemClock.elapsedRealtime() - capture.createdAt >= 300_000) {
+            capture = capture.withoutCode();
+            captureCodeExpired = true;
+            status = captureSummary();
+        }
         return capture;
     }
     public static synchronized void captured(String code, String own, List<String> gids, boolean observed, CapturePlatform platform) {
         captured(new Capture(code, own == null ? "" : own, gids, SystemClock.elapsedRealtime(), observed).forPlatform(platform));
     }
     static synchronized void captured(Capture value) {
+        resetCapture();
+        saveCapture(value);
+        changed();
+    }
+    private static void saveCapture(Capture value) {
         capture = value;
         MAIN.postDelayed(() -> { capture(); changed(); }, Math.max(0, 300_100 - (SystemClock.elapsedRealtime() - value.createdAt)));
+    }
+    /** A TCP connection belongs to the round in which it was accepted. */
+    static synchronized long captureEpoch() { capture(); return captureEpoch; }
+    static synchronized boolean claimNetworkCapture(long expectedEpoch, long generation) {
+        capture();
+        if (!capturing || expectedEpoch != captureEpoch || networkCaptureGeneration != 0 || capture != null) return false;
+        networkCaptureGeneration = generation;
+        return true;
+    }
+    static synchronized boolean acceptsNetworkCapture(long generation) {
+        capture();
+        return capturing && networkCaptureGeneration == generation;
+    }
+    static synchronized void releaseUnpublishedCapture(long generation) {
+        if (!networkCapturePublished && networkCaptureGeneration == generation) resetCapture();
+    }
+    static synchronized void releaseUnpublishedCapture() {
+        if (!networkCapturePublished && networkCaptureGeneration != 0) resetCapture();
+    }
+    static synchronized void networkForwardingClosed() {
+        // Called after the old proxy is closed. Its already accepted sockets
+        // cannot claim the next round while their worker threads unwind.
+        captureEpoch++;
+        if (!networkCapturePublished) networkCaptureGeneration = 0;
+        captureCollecting = false;
+    }
+    static synchronized boolean networkCaptured(Capture value, boolean complete) {
+        if (!acceptsNetworkCapture(value.generation)) return false;
+        if (!networkCapturePublished) {
+            networkCapturePublished = true;
+            saveCapture(value);
+            capture();
+        } else if (!completeCapture(value)) return false;
+        captureCollecting = !complete;
+        status = captureSummary();
         changed();
+        return true;
     }
     static synchronized boolean completeCapture(Capture value) {
         Capture previous = capture();
         // A delayed friend reply must not restore an expired, cleared, replaced,
         // or already submitted Code, nor restart its five-minute lifetime.
         if (previous == null || previous.generation != value.generation || previous.platform != value.platform) return false;
-        capture = new Capture(previous.code.isEmpty() ? "" : value.code, value.ownGid, value.gids,
-                previous.createdAt, value.friendsObserved, previous.generation, previous.platform);
+        if (!previous.ownGid.isEmpty() && !value.ownGid.isEmpty() && !previous.ownGid.equals(value.ownGid)) return false;
+        String own = value.ownGid.isEmpty() ? previous.ownGid : value.ownGid;
+        java.util.LinkedHashSet<String> pending = new java.util.LinkedHashSet<>(previous.gids);
+        pending.addAll(value.gids); pending.removeAll(consumedGids); pending.remove(own);
+        capture = new Capture(previous.code, own, new ArrayList<>(pending),
+                previous.createdAt, previous.friendsObserved || value.friendsObserved, previous.generation, previous.platform);
         changed(); return true;
     }
-    public static synchronized void clearCapture() { capture = null; changed(); }
+    private static void resetCapture() {
+        capture = null; captureEpoch++; networkCaptureGeneration = 0; networkCapturePublished = false;
+        captureCollecting = false; captureCodeExpired = false; consumedGids.clear();
+    }
+    public static synchronized void clearCapture() {
+        resetCapture();
+        if (capturing) status = "结果已清除 · 可换号重新进入农场";
+        changed();
+    }
+    /** Incremental replies keep a selected snapshot valid until its data is consumed. */
+    public static synchronized boolean isCurrentCapture(Capture original) {
+        Capture current = capture();
+        return original != null && current != null && original.generation == current.generation && original.platform == current.platform
+                && (original.code.isEmpty() || original.code.equals(current.code))
+                && current.gids.containsAll(original.gids)
+                && (original.ownGid.isEmpty() || current.ownGid.isEmpty() || original.ownGid.equals(current.ownGid));
+    }
+    public static synchronized boolean hasPendingCapture() {
+        Capture current = capture();
+        return current != null && (!current.code.isEmpty() || !current.gids.isEmpty());
+    }
+    public static synchronized String captureSummary() {
+        Capture current = capture();
+        if (current == null) return capturing ? "等待进入 " + capturePlatform.label + " 农场" : "暂无获取结果";
+        String suffix = capturing ? " · VPN 保持运行" : "";
+        if (!current.gids.isEmpty()) return (captureCodeExpired ? "Code 已过期 · " : current.code.isEmpty() ? "" : "Code 已取得 · ") + "已读取 " + current.gids.size() + " 位好友，可立即同步" + suffix;
+        if (!current.code.isEmpty()) return "Code 已取得，可立即同步" + (captureCollecting ? " · 等待好友回包" : "") + suffix;
+        if (!consumedGids.isEmpty()) return (captureCodeExpired ? "Code 已过期 · " : "") + "已同步当前好友" + (captureCollecting ? " · 继续接收新好友" : "") + suffix;
+        if (current.friendsObserved) return (captureCodeExpired ? "Code 已过期 · " : "") + "已收到好友回包 · 暂无待同步好友" + suffix;
+        if (captureCodeExpired) return "Code 已过期，请清除后重新获取" + (captureCollecting ? " · 仍可接收好友" : "") + suffix;
+        return (captureCollecting ? "农场已连接 · 等待好友回包" : "当前结果已同步") + suffix;
+    }
     public static synchronized void consumeCode(Capture original) {
-        if (capture != null && capture.generation == original.generation)
+        if (capture != null && capture.generation == original.generation && capture.platform == original.platform)
             capture = new Capture("", capture.ownGid, capture.gids, capture.createdAt, capture.friendsObserved, capture.generation, capture.platform);
+        status = captureSummary();
         changed();
     }
     public static synchronized void consumeFriends(Capture original) {
-        if (capture != null && capture.generation == original.generation)
-            capture = new Capture(capture.code, capture.ownGid, java.util.Collections.emptyList(), capture.createdAt, false, capture.generation, capture.platform);
+        if (capture != null && capture.generation == original.generation && capture.platform == original.platform) {
+            consumedGids.addAll(original.gids);
+            ArrayList<String> pending = new ArrayList<>(capture.gids); pending.removeAll(consumedGids);
+            capture = new Capture(capture.code, capture.ownGid, pending, capture.createdAt, capture.friendsObserved, capture.generation, capture.platform);
+        }
+        status = captureSummary();
         changed();
     }
     public static synchronized void log(String tag, String text) {

@@ -60,6 +60,8 @@ public final class MainActivity extends AppCompatActivity {
     private String pendingExport;
     private File verifiedUpdate;
     private boolean busy;
+    private boolean requestingOverlay;
+    private MaterialSwitch overlaySwitch;
     // Capture page
     private FrameLayout core;
     private View halo;
@@ -129,18 +131,27 @@ public final class MainActivity extends AppCompatActivity {
         if (savedInstanceState != null) {
             page = savedInstanceState.getInt("page", 1); wechatVpn = savedInstanceState.getBoolean("wechatVpn");
             handledCapture = savedInstanceState.getLong("handledCapture", -1);
+            requestingOverlay = savedInstanceState.getBoolean("requestingOverlay");
         }
         navigation.setSelectedItemId(navId(page)); showPage();
         handleIntent(getIntent());
     }
     @Override protected void onResume() {
         super.onResume(); Ui.secure(getWindow()); AppState.listen(listener); syncMonitor(false); refresh();
+        if (requestingOverlay) {
+            requestingOverlay = false;
+            AppState.settings.overlayEnabled(Settings.canDrawOverlays(this));
+            if (!Settings.canDrawOverlays(this)) message("未允许悬浮窗，可继续在应用内查看结果");
+        }
+        if (overlaySwitch != null) Ui.setQuietly(overlaySwitch, AppState.settings.overlayEnabled() && Settings.canDrawOverlays(this));
+        AppState.changed();
         if (page == 2) loadAccounts();
     }
     @Override protected void onPause() { AppState.unlisten(listener); super.onPause(); }
     @Override protected void onDestroy() { if (breathing != null) breathing.cancel(); super.onDestroy(); }
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putInt("page", page); state.putBoolean("wechatVpn", wechatVpn); state.putLong("handledCapture", handledCapture);
+        state.putBoolean("requestingOverlay", requestingOverlay);
         super.onSaveInstanceState(state);
     }
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); setIntent(intent); handleIntent(intent); }
@@ -175,7 +186,7 @@ public final class MainActivity extends AppCompatActivity {
     private void showPage() {
         if (breathing != null) { breathing.cancel(); breathing = null; }
         core = null; halo = null; coreIcon = null; ringLabel = ringStatus = null; appButton = null; segment = resultSlot = null; resultKey = null;
-        accountList = null; monitorSwitch = null; monitorStatus = accountTitle = null; selectAll = null; logs = connections = null;
+        accountList = null; monitorSwitch = overlaySwitch = null; monitorStatus = accountTitle = null; selectAll = null; logs = connections = null;
         content.removeAllViews();
         switch (page) { case 1: capturePage(); break; case 2: accountsPage(); break; case 3: logsPage(); break; default: settingsPage(); }
         scroll.scrollTo(0, 0); refresh();
@@ -279,7 +290,7 @@ public final class MainActivity extends AppCompatActivity {
         core.setBackground(ui.oval(running || done ? R.color.farm_accent : R.color.farm_card));
         coreIcon.setImageResource(scan ? R.drawable.ic_qr : done ? R.drawable.ic_check : R.drawable.ic_power);
         coreIcon.setImageTintList(ColorStateList.valueOf(getColor(running || done ? R.color.farm_on_accent : R.color.farm_accent)));
-        String label = scan ? "扫码登录" : running ? "停止获取" : AppState.settings.passthrough() ? "开始透传诊断" : "开始获取";
+        String label = scan ? "扫码登录" : running ? "停止 VPN" : AppState.settings.passthrough() ? "开始透传诊断" : "开始获取";
         ringLabel.setText(label); core.setContentDescription(label);
         ringStatus.setText(scan ? "通过服务器生成登录二维码" : AppState.capturing || result != null ? AppState.status
                 : AppState.settings.passthrough() ? "只测试联网，不获取 Code" : "点击后进入 " + platform.label + " 农场");
@@ -292,7 +303,7 @@ public final class MainActivity extends AppCompatActivity {
         } else if (!running && breathing != null) {
             breathing.cancel(); breathing = null; halo.setScaleX(1); halo.setScaleY(1); halo.setAlpha(1);
         }
-        String key = result == null ? "" : result.generation() + "/" + result.code().isEmpty() + "/" + result.gids().size() + "/" + result.ownGid().isEmpty() + "/" + AppState.capturing;
+        String key = result == null ? "" : result.generation() + "/" + result.code().isEmpty() + "/" + result.gids().size() + "/" + result.ownGid().isEmpty() + "/" + AppState.capturing + "/" + ApiClient.isPushing();
         if (!key.equals(resultKey)) { resultKey = key; renderResult(result); }
     }
     private void renderResult(AppState.Capture result) {
@@ -307,13 +318,17 @@ public final class MainActivity extends AppCompatActivity {
         ui.add(body, title, 12);
         LinearLayout facts = ui.row();
         fact(facts, result.code().isEmpty() ? "—" : "已获取", "Code");
-        fact(facts, Integer.toString(result.gids().size()), result.friendsObserved() || result.gids().isEmpty() ? "好友" : "好友（手动）");
+        fact(facts, Integer.toString(result.gids().size()), "待同步好友");
         fact(facts, result.ownGid().isEmpty() ? "—" : "已识别", "身份");
         ui.add(body, facts, 14);
         LinearLayout actions = ui.row();
         MaterialButton push = ui.button(actions, "推送到服务器", Ui.Tone.PRIMARY, R.drawable.ic_upload, () -> syncCapture(false));
-        push.setEnabled(!AppState.capturing);
-        MaterialButton clear = ui.button(actions, "清除", Ui.Tone.DANGER, AppState::clearCapture);
+        push.setEnabled(!ApiClient.isPushing() && (!result.code().isEmpty() || !result.gids().isEmpty()));
+        MaterialButton clear = ui.button(actions, "清除", Ui.Tone.DANGER, () -> {
+            if (ApiClient.isPushing()) { message("正在推送，请等待本次完成"); return; }
+            AppState.clearCapture();
+        });
+        clear.setEnabled(!ApiClient.isPushing());
         clear.setMinHeight(ui.dp(52));
         ui.add(body, actions, 0);
     }
@@ -395,64 +410,61 @@ public final class MainActivity extends AppCompatActivity {
             List<ApiClient.Account> accounts = client.accounts();
             accounts.removeIf(account -> !account.platform.equals(capture.platform().id));
             String own = capture.ownGid(), previousId = AppState.settings.targetId();
-            ApiClient.Account byGid = null, previous = null;
+            ApiClient.Account byGid = client.matchingAccount(accounts, capture), previous = null;
             for (ApiClient.Account account : accounts) {
-                if (!own.isEmpty() && own.equals(account.gid)) byGid = account;
-                if (account.id.equals(previousId) && (own.isEmpty() || account.gid.isEmpty() || own.equals(account.gid))) previous = account;
+                String known = client.knownGid(account);
+                if (account.id.equals(previousId) && (own.isEmpty() || known.isEmpty() || own.equals(known))) previous = account;
             }
             ApiClient.Account detected = byGid, last = previous;
             runOnUiThread(() -> {
                 AppState.Capture current = AppState.capture();
                 if (isFinishing() || isDestroyed() || !client.isCurrent() || current == null || current.generation() != capture.generation()) return;
-                if (detected != null) confirmPush(detected, true, accounts, code, friends);
-                else if (last != null) confirmPush(last, false, accounts, code, friends);
-                else chooseDestination(accounts, code, friends);
+                if (detected != null) confirmPush(detected, true, accounts, capture, code, friends);
+                else if (last != null) confirmPush(last, false, accounts, capture, code, friends);
+                else chooseDestination(accounts, capture, code, friends);
             });
         });
     }
-    private String pushSummary(boolean code, boolean friends) {
-        AppState.Capture capture = AppState.capture();
+    private String pushSummary(AppState.Capture capture, boolean code, boolean friends) {
         int count = capture == null ? 0 : capture.gids().size();
         return code && friends ? "将推送 Code 和 " + count + " 位好友。" : code ? "将推送 Code。" : "将追加 " + count + " 位好友。";
     }
-    private void confirmPush(ApiClient.Account account, boolean detected, List<ApiClient.Account> accounts, boolean code, boolean friends) {
+    private void confirmPush(ApiClient.Account account, boolean detected, List<ApiClient.Account> accounts, AppState.Capture capture, boolean code, boolean friends) {
         new MaterialAlertDialogBuilder(this).setTitle(detected ? "检测到已有账号" : "推送到上次的账号？")
-                .setMessage(account.name + "\nID " + account.id + "\n\n" + pushSummary(code, friends))
-                .setPositiveButton(detected ? "更新" : "推送", (d, w) -> push(account, code, friends))
-                .setNeutralButton("选择其他", (d, w) -> chooseDestination(accounts, code, friends))
+                .setMessage(account.name + "\n" + account.identityLabel() + "\n\n" + pushSummary(capture, code, friends))
+                .setPositiveButton(detected ? "更新" : "推送", (d, w) -> push(account, capture, code, friends))
+                .setNeutralButton("选择其他", (d, w) -> chooseDestination(accounts, capture, code, friends))
                 .setNegativeButton("取消", null).show();
     }
-    private void chooseDestination(List<ApiClient.Account> accounts, boolean code, boolean friends) {
+    private void chooseDestination(List<ApiClient.Account> accounts, AppState.Capture capture, boolean code, boolean friends) {
         if (!code && accounts.isEmpty()) { message("服务器上没有同平台账号；只有好友数据时无法新增"); return; }
         List<String> labels = new ArrayList<>();
         if (code) labels.add("＋ 新增账号");
-        for (ApiClient.Account account : accounts) labels.add(account.name + "（ID " + account.id + "）");
-        new MaterialAlertDialogBuilder(this).setTitle(code ? "未找到相同账号" : "追加好友到")
+        for (ApiClient.Account account : accounts) labels.add(account.selectionLabel());
+        new MaterialAlertDialogBuilder(this).setTitle(code ? "选择账号" : "追加好友到")
                 .setItems(labels.toArray(new String[0]), (d, which) -> {
-                    if (code && which == 0) { createAccount(friends); return; }
+                    if (code && which == 0) { createAccount(capture, friends); return; }
                     ApiClient.Account account = accounts.get(which - (code ? 1 : 0));
-                    if (!code) { push(account, false, friends); return; }
+                    if (!code) { push(account, capture, false, friends); return; }
                     new MaterialAlertDialogBuilder(this).setTitle("覆盖「" + account.name + "」？")
-                            .setMessage("这个账号的登录将被替换为本次获取的 Code。\n" + pushSummary(code, friends))
-                            .setPositiveButton("覆盖", (x, y) -> push(account, code, friends))
+                            .setMessage(account.identityLabel() + "\n这个账号的登录将被替换为本次获取的 Code。\n" + pushSummary(capture, code, friends))
+                            .setPositiveButton("覆盖", (x, y) -> push(account, capture, code, friends))
                             .setNegativeButton("取消", null).show();
                 }).setNegativeButton("取消", null).show();
     }
-    private void push(ApiClient.Account account, boolean code, boolean friends) {
-        AppState.Capture capture = AppState.capture();
+    private void push(ApiClient.Account account, AppState.Capture capture, boolean code, boolean friends) {
         if (capture == null) { message("结果已过期，请重新获取"); return; }
         long generation = capture.generation();
         async("正在推送", () -> {
             AppState.Capture current = AppState.capture();
             if (current == null || current.generation() != generation) throw new IllegalStateException("结果已过期，请重新获取");
-            new ApiClient(AppState.settings).push(account.id, current, code && !current.code().isEmpty(), friends && !current.gids().isEmpty());
+            new ApiClient(AppState.settings).push(account.id, capture, code, friends);
             AppState.settings.target(account);
             runOnUiThread(() -> message("已推送到 " + account.name));
             if (code) watchOnline(account);
         });
     }
-    private void createAccount(boolean friends) {
-        AppState.Capture capture = AppState.capture();
+    private void createAccount(AppState.Capture capture, boolean friends) {
         if (capture == null || capture.code().isEmpty()) { message("新增账号需要 Code"); return; }
         String nonce = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         LinearLayout form = ui.column(); form.setPadding(ui.dp(24), ui.dp(8), ui.dp(24), 0);
@@ -468,7 +480,7 @@ public final class MainActivity extends AppCompatActivity {
             dialog.dismiss();
             String connection = AppState.settings.connectionId();
             async("正在新增账号", () -> {
-                if (!connection.equals(AppState.settings.connectionId()) || AppState.capture() != capture)
+                if (!connection.equals(AppState.settings.connectionId()) || !AppState.isCurrentCapture(capture))
                     throw new IllegalStateException("服务器或本次结果已变化，请重新推送");
                 ApiClient.Account created = new ApiClient(AppState.settings).create(baseName, actualName, capture, friends);
                 runOnUiThread(() -> message("已新增账号 " + created.name));
@@ -616,10 +628,9 @@ public final class MainActivity extends AppCompatActivity {
             ImageView toggle = ui.iconButton(bell ? R.drawable.ic_bell : R.drawable.ic_bell_off, bell ? R.color.farm_accent : R.color.farm_line_strong,
                     bell ? "关闭 " + account.name + " 的掉线提醒" : "开启 " + account.name + " 的掉线提醒", () -> toggleWatch(account));
             if (bell) toggle.setBackground(ui.oval(R.color.farm_tint));
-            String platform = account.platform.equals("wx") ? "微信" : account.platform.equals("qq") ? "QQ" : account.platform;
             String state = online == null ? (account.running ? "检查中" : "已停止") : online ? "在线" : "离线";
             int tone = online == null ? R.color.farm_line_strong : online ? R.color.farm_accent : R.color.farm_danger;
-            ui.listRow(card, ui.dot(tone), account.name, platform + " · " + state, toggle, () -> relogin(account));
+            ui.listRow(card, ui.dot(tone), account.name, account.identityLabel() + " · " + state, toggle, () -> relogin(account));
         }
         TextView hint = ui.text("点账号重新登录，点铃铛开关该账号的掉线提醒。", 12, R.color.farm_muted);
         hint.setPadding(ui.dp(6), ui.dp(10), ui.dp(6), 0); ui.add(accountList, hint, 0);
@@ -634,7 +645,7 @@ public final class MainActivity extends AppCompatActivity {
         CapturePlatform platform;
         try { platform = CapturePlatform.fromId(account.platform); } catch (IllegalArgumentException e) { message(e.getMessage()); return; }
         new MaterialAlertDialogBuilder(this).setTitle("重新登录「" + account.name + "」？")
-                .setMessage(platform == CapturePlatform.WECHAT ? "将打开微信扫码登录。" : "请先在 QQ 中切换到这个账号，然后开始获取。")
+                .setMessage(account.identityLabel() + "\n" + (platform == CapturePlatform.WECHAT ? "将打开微信扫码登录。" : "请先在 QQ 中切换到这个账号，然后开始获取。"))
                 .setNegativeButton("取消", null).setPositiveButton("继续", (d, w) -> {
                     if (!switchPlatform(platform)) return;
                     AppState.settings.target(account);
@@ -726,6 +737,8 @@ public final class MainActivity extends AppCompatActivity {
 
         ui.section(content, "获取");
         LinearLayout capture = ui.card(content);
+        overlaySwitch = ui.switchRow(capture, "悬浮窗", "在 QQ 中查看结果、推送和换号继续获取",
+                AppState.settings.overlayEnabled() && Settings.canDrawOverlays(this), this::setOverlayEnabled);
         boolean wechat = AppState.settings.capturePlatform() == CapturePlatform.WECHAT;
         ui.switchRow(capture, wechat ? "微信 VPN 只读好友" : "同时读取好友", wechat ? "开启后不保留 Code" : null,
                 AppState.settings.friendCapture(), AppState.settings::friendCapture);
@@ -777,6 +790,17 @@ public final class MainActivity extends AppCompatActivity {
         ui.add(content, danger, 0);
     }
     private interface Accept { void apply(String value) throws Exception; }
+    private void setOverlayEnabled(boolean enabled) {
+        if (!enabled || Settings.canDrawOverlays(this)) {
+            AppState.settings.overlayEnabled(enabled); AppState.changed(); return;
+        }
+        if (overlaySwitch != null) Ui.setQuietly(overlaySwitch, false);
+        requestingOverlay = true;
+        try { startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName()))); }
+        catch (android.content.ActivityNotFoundException unavailable) {
+            requestingOverlay = false; message("请在系统应用权限中允许农场助手显示悬浮窗");
+        }
+    }
     private void prompt(String title, String value, int inputType, Accept accept) {
         LinearLayout form = ui.column(); form.setPadding(ui.dp(24), ui.dp(8), ui.dp(24), 0);
         TextInputEditText edit = ui.input(form, title, value, false); edit.setInputType(inputType);
@@ -799,11 +823,14 @@ public final class MainActivity extends AppCompatActivity {
     // ---------------------------------------------------------------- 刷新
     private void refresh() {
         AppState.Capture finished = AppState.capture();
-        if (finished != null && !AppState.capturing && finished.generation() != handledCapture) {
+        if (finished != null && AppState.hasPendingCapture() && !busy && !ApiClient.isPushing()
+                && (!finished.ownGid().isEmpty() || finished.friendsObserved() || !AppState.captureCollecting)
+                && finished.generation() != handledCapture) {
             handledCapture = finished.generation();
             if (AppState.settings.autoPush()) root.post(() -> syncCapture(true));
         }
         if (core != null) refreshCapture();
+        if (overlaySwitch != null) Ui.setQuietly(overlaySwitch, AppState.settings.overlayEnabled() && Settings.canDrawOverlays(this));
         if (monitorSwitch != null) {
             boolean enabled = AppState.settings.monitorEnabled();
             monitorSwitch.setTag(Boolean.TRUE); monitorSwitch.setChecked(enabled); monitorSwitch.setTag(null);

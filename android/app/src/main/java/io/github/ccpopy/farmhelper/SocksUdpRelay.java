@@ -110,7 +110,7 @@ final class SocksUdpRelay implements AutoCloseable {
                 // The authenticated SOCKS control connection owns each mapping.
                 // Its closure, a network change, or VPN shutdown releases flows.
             }
-        } catch (Exception error) { if (active) { AppState.log("代理", "UDP 转发停止，正在停止本次 VPN 以恢复网络"); stopCapture.run(); } }
+        } catch (Exception error) { if (active) { AppState.log("代理", "UDP 转发暂时中断，正在恢复转发"); stopCapture.run(); } }
         finally {
             java.util.Arrays.fill(bytes, (byte)0);
             for (SelectionKey key : selector.keys()) closeChannel(key.channel());

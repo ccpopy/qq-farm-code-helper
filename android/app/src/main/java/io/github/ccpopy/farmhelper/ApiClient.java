@@ -14,6 +14,22 @@ import java.util.List;
 
 /** No redirects: an admin token must never follow a redirect to another host. */
 public final class ApiClient {
+    private static final java.util.concurrent.atomic.AtomicBoolean PUSHING = new java.util.concurrent.atomic.AtomicBoolean();
+    public static boolean isPushing() { return PUSHING.get(); }
+    private static void beginPush() throws IOException {
+        if (!PUSHING.compareAndSet(false, true)) throw new IOException("正在推送，请等待本次完成");
+        AppState.changed();
+    }
+    private static void endPush() { PUSHING.set(false); AppState.changed(); }
+    private void requirePending(AppState.Capture requested, boolean code, boolean friends) throws IOException {
+        AppState.Capture current = AppState.capture();
+        if (!isCurrent() || current == null || requested == null || current.generation() != requested.generation()
+                || current.platform() != requested.platform()) throw new IOException("服务器或本次结果已变化，请重新确认");
+        if (code && (requested.code().isEmpty() || !requested.code().equals(current.code())))
+            throw new IOException("Code 已推送或过期，请重新获取");
+        if (friends && (requested.gids().isEmpty() || !current.gids().containsAll(requested.gids())))
+            throw new IOException("好友结果已变化或已同步，请重新确认");
+    }
     private final String server;
     private final String token;
     private final SettingsStore settings;
@@ -35,18 +51,41 @@ public final class ApiClient {
     }
     public boolean isCurrent() { return connectionId.equals(settings.connectionId()); }
     public static final class Account {
-        public final String id, name, platform, gid, uuid;
+        public final String id, name, platform, gid, uuid, qq;
         public final boolean running;
         Account(JSONObject json) {
             id = json.optString("id"); name = json.optString("name", id);
-            platform = json.optString("platform", "qq"); gid = json.optString("gid");
-            uuid = json.optString("uuid");
+            platform = json.optString("platform", "qq"); gid = AccountIdentity.gid(json.optString("gid"));
+            // The panel uses uin; older servers may only expose qq. Neither is a game GID.
+            String uin = AccountIdentity.qq(json.optString("uin"));
+            qq = platform.equals("qq") ? (uin.isEmpty() ? AccountIdentity.qq(json.optString("qq")) : uin) : "";
+            uuid = json.isNull("uuid") ? "" : json.optString("uuid").trim();
             running = json.optBoolean("running");
         }
-        public String label() { return name + "  ·  " + (platform.equals("qq") ? "QQ" : platform.equals("wx") ? "微信" : platform) + "  ·  " + (running ? "运行中" : "已停止") + "  ·  ID " + id; }
+        public String identityLabel() {
+            String source = platform.equals("qq") ? "QQ" : platform.equals("wx") ? "微信" : platform;
+            if (!qq.isEmpty()) return "QQ " + qq;
+            if (!gid.isEmpty()) return source + " · 农场 GID " + gid;
+            return source + " · 账号 ID " + id;
+        }
+        public String selectionLabel() { return name + "（" + identityLabel() + "）"; }
+        public String label() { return selectionLabel() + " · " + (running ? "运行中" : "已停止"); }
     }
     public List<Account> accounts() throws Exception {
         return parseAccounts(call("GET", "/api/accounts", null, null));
+    }
+    public String knownGid(Account account) {
+        return account.gid.isEmpty() ? settings.rememberedGid(connectionId, account) : account.gid;
+    }
+    public Account matchingAccount(List<Account> accounts, AppState.Capture capture) {
+        if (capture.ownGid().isEmpty()) return null;
+        Account match = null;
+        for (Account account : accounts) {
+            if (!account.platform.equals(capture.platform().id) || !capture.ownGid().equals(knownGid(account))) continue;
+            if (match != null) return null;
+            match = account;
+        }
+        return match;
     }
     private static List<Account> parseAccounts(JSONObject response) throws Exception {
         Object data = response.opt("data");
@@ -67,14 +106,20 @@ public final class ApiClient {
         for (Account account : existing) {
             if (account.name.trim().equals(baseName.trim()) || account.name.trim().equals(actualName))
                 throw new IOException("服务器已有同名备注；上游同名会更新旧账号，请改用不同备注或选择更新已有账号");
-            if (capture.platform().id.equals(account.platform) && !capture.ownGid().isEmpty() && capture.ownGid().equals(account.gid))
+            if (capture.platform().id.equals(account.platform) && !capture.ownGid().isEmpty() && capture.ownGid().equals(knownGid(account)))
                 throw new IOException("这个 GID 已存在于服务器，请选择对应账号更新，不要重复新增");
         }
         return existing;
     }
     public Account create(String baseName, String actualName, AppState.Capture capture, boolean friends) throws Exception {
+        beginPush();
+        try { return createPending(baseName, actualName, capture, friends); }
+        finally { endPush(); }
+    }
+    private Account createPending(String baseName, String actualName, AppState.Capture capture, boolean friends) throws Exception {
+        requirePending(capture, true, friends);
         List<Account> before = checkNewAccount(baseName, actualName, capture, friends);
-        if (AppState.capture() != capture) throw new IOException("结果已过期或变更，请重新获取后确认");
+        requirePending(capture, true, friends);
         JSONObject body = new JSONObject().put("name", actualName).put("code", capture.code())
                 .put("platform", capture.platform().id).put("loginType", "manual");
         JSONObject response;
@@ -101,6 +146,7 @@ public final class ApiClient {
         }
         if (!isCurrent()) throw new IOException("新增请求已提交，但服务器配置已变化；不会绑定到新配置，请在原服务器确认");
         settings.target(created);
+        settings.rememberIdentity(connectionId, created, capture);
         AppState.log("推送", "新账号已创建并绑定服务器返回的 ID；由服务器按其规则自动启动");
         if (friends) {
             try { appendFriends(created.id, capture); }
@@ -119,6 +165,13 @@ public final class ApiClient {
         return data.getJSONObject("connection").optBoolean("connected");
     }
     public void push(String targetId, AppState.Capture capture, boolean code, boolean friends) throws Exception {
+        if (!code && !friends) throw new IOException("没有待推送的数据");
+        beginPush();
+        try { pushPending(targetId, capture, code, friends); }
+        finally { endPush(); }
+    }
+    private void pushPending(String targetId, AppState.Capture capture, boolean code, boolean friends) throws Exception {
+        requirePending(capture, code, friends);
         if (targetId.isEmpty()) throw new IOException("请先选择目标账号");
         Account target = null;
         for (Account account : accounts()) if (account.id.equals(targetId)) target = account;
@@ -126,12 +179,14 @@ public final class ApiClient {
         if (!target.platform.equals(capture.platform().id)) throw new IOException("获取结果来自 " + capture.platform().label + "，请选择同一平台的账号");
         if (!capture.ownGid().isEmpty() && !target.gid.isEmpty() && !target.gid.equals(capture.ownGid()))
             throw new IOException("捕获身份与服务器 GID 不一致，已阻止更新");
+        requirePending(capture, code, friends);
         if (code) {
             if (capture.code().isEmpty()) throw new IOException("没有可推送的 Code");
             JSONObject body = new JSONObject().put("id", target.id).put("name", target.name)
                     .put("code", capture.code()).put("platform", capture.platform().id).put("loginType", "manual");
             call("POST", "/api/accounts", body, null);
             AppState.consumeCode(capture);
+            settings.rememberIdentity(connectionId, target, capture);
             AppState.log("推送", "Code 已更新；正在启动对应远程账号");
             try { call("POST", "/api/accounts/" + safeId(target.id) + "/start", new JSONObject(), null); }
             catch (Exception e) { throw new IOException("Code 已更新，但启动失败；请在管理页面检查，不要重复使用旧 Code"); }
@@ -141,6 +196,7 @@ public final class ApiClient {
         }
     }
     private void appendFriends(String targetId, AppState.Capture capture) throws Exception {
+        requirePending(capture, false, true);
         List<String> gids = UrlPolicy.gids(String.join(",", capture.gids()), capture.ownGid());
         if (gids.isEmpty()) throw new IOException("没有好友 GID 可同步；Code 若已成功提交则不会再次使用");
         call("POST", "/api/friend-known-gids/batch-add", new JSONObject().put("gids", new JSONArray(gids)), targetId);
