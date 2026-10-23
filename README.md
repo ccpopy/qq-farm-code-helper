@@ -1,5 +1,10 @@
 # 农场 Code 获取助手
 
+本分支提供 **农场助手 Android**，支持 Android 10 及以上。请下载
+[Android 0.1.0 APK](https://github.com/ccpopy/qq-farm-code-helper/releases/tag/android-v0.1.0)，
+并阅读 [Android 使用与构建说明](android/README.md) 和 [更新日志](android/CHANGELOG.md)。
+Android 标签为 `android-vX.Y.Z`，与下述 Windows 桌面版本独立发布。
+
 一个面向 Windows 桌面客户端的小型 Rust/Tauri 应用。它会在本机临时启用定向代理，仅处理目标农场网关：透明转发同一次 `/prod/ws` 官方登录，在内存中保留 `code` 并读取官方 `SyncAll` 响应中的好友 GID，随后一起同步到远程服务器。
 
 获取后可以：

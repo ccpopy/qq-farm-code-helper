@@ -1,7 +1,9 @@
-# 农场助手 Android（开发版）
+# 农场助手 Android
 
 原生 Java / Material Components Android 应用，不依赖 Android Studio。
-当前保持 `versionName 0.1.0`、`versionCode 1`，尚未正式发布。
+当前正式版本为 `0.1.0`（`versionCode 1000`），支持 Android 10 及以上。
+[下载 Android 正式版](https://github.com/ccpopy/qq-farm-code-helper/releases/tag/android-v0.1.0)，
+使用说明及限制见下文和 [Android 更新日志](CHANGELOG.md)。
 
 ## 构建与覆盖安装
 
@@ -13,6 +15,7 @@
 ```powershell
 .\scripts\build-android.ps1 -JdkDirectory $env:JAVA_HOME -SdkDirectory $env:ANDROID_HOME
 .\scripts\build-android.ps1 -Install -DeviceSerial <已授权设备序列号> -AdbPath <adb路径>
+.\scripts\build-android.ps1 -Configuration Release -Version 0.1.0 -Bundle
 ```
 
 脚本验证固定的 hev-socks5-tunnel 2.19.1 AAR 的 SHA-256，并从固定提交和子模块构建
@@ -44,7 +47,9 @@ Gradle 校验私钥存在、证书指纹和包名，构建脚本再次检查 APK
 - 获取结束后（或手动导入后）按设置自动比对服务器同平台账号：自身 GID 相同的账号提示“检测到已有账号”，
   其次提示上次推送的账号；否则由用户选择新增或覆盖已有账号。任何写入都需要用户确认。
   推送内容（Code、好友）和是否自动比对在设置页“推送”中开关，默认全部开启。推送 Code 后自动检查账号是否上线。
-- 账号页自动读取服务器账号并逐个检查在线状态；铃铛选择需要掉线提醒的账号，顶部开关控制提醒服务。
+- 账号页自动读取服务器账号并逐个检查在线状态。“掉线提醒”开关与账号选择相互独立：铃铛或“全选”选择账号，
+  开关开启且至少选中一个账号时才运行提醒服务；未选择账号等同于不提醒。通知栏“停止”会同时关闭开关。
+- 设置页“允许截图”默认关闭（`FLAG_SECURE`，截屏与录屏为黑色）；开启后应用画面可正常截屏。
 
 1. 在设置页填写自己的 Node 部署服务器 URL 和管理 API Token，“保存并测试”。
 2. 设置页“透传诊断”可先确认农场能正常进入；此模式不解密，也不会获取 Code。
@@ -209,9 +214,25 @@ versionCode 和 APK 签名，随后由用户确认安装。更新源不接收服
 创建 Android Release 时设置 `make_latest: false`，避免影响桌面应用的 latest 更新通道。
 未获得发布授权不创建 Release，也不为测试增加版本。
 
+### 标签驱动的 Actions 发布
+
+`.github/workflows/release-android.yml` 在推送 `android-vX.Y.Z` 标签时构建 APK 和 AAB，
+从标签设置 `versionName`，按 `major * 1000000 + minor * 1000 + patch` 生成递增的
+`versionCode`（minor、patch 各不超过 999）。本地不传 `-Version` 时使用 Gradle 中的当前版本。
+先更新 `android/CHANGELOG.md` 对应标签的条目，再提交并打标签；发布说明来自这个条目。
+
+仓库 Actions Secrets 需配置原有签名材料：`ANDROID_KEYSTORE_BASE64`、
+`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS` 和 `ANDROID_KEY_PASSWORD`。
+Base64 只是密钥文件的传输编码，只能放在加密 Secret 中。缺少原密钥或签名不匹配时构建失败。
+工作流验证 APK/AAB 签名，全部产物上传到草稿后才公开正式 Release，并保持桌面 latest 不变。
+
+发布资产为 `QQFarmCodeHelper-android-vX.Y.Z.apk`、同名 `.aab` 和 `SHA256SUMS.txt`。
+APK 可直接安装；AAB 是分发平台输入，不能直接安装。混淆映射作为 Actions 构建产物保留。
+源码中不提交 APK、AAB、原生库构建产物或签名私钥。
+
 ## 当前已知问题与继续排查
 
-这是开发版本，不代表全部功能已验收。蜂窝网络透传已验证能够完整进入真实 QQ 农场。
+以下记录明确已验证的行为与仍需确认的兼容性。蜂窝网络透传已验证能够完整进入真实 QQ 农场。
 2026-10-23 真机交替对照：关闭移动数据、仅 WLAN 时 3 次冷启动均进入农场；WLAN 与
 移动数据同时开启、系统网络切换开启时 3 次均出现平台登录失败。双网络下停止助手 VPN
 可以进入。用户随后关闭系统“网络切换”和“数据加速”、重启 VPN，也正常进入。

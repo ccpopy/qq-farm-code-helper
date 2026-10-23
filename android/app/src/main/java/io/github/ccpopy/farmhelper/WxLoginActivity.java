@@ -3,7 +3,6 @@ package io.github.ccpopy.farmhelper;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
-import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -33,7 +32,7 @@ public final class WxLoginActivity extends AppCompatActivity {
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         ui = new Ui(this);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        Ui.secure(getWindow());
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         model = new ViewModelProvider(this).get(WxLoginModel.class);
         if (savedInstanceState == null && model.phase == WxLoginModel.Phase.IDLE
@@ -62,16 +61,23 @@ public final class WxLoginActivity extends AppCompatActivity {
         destination = ui.listRow(card, "登录到", "", null, this::chooseAccount);
         accountRow = (View) destination.getParent().getParent();
 
+        View gap = new View(this); ui.add(content, gap, 12);
+        LinearLayout hero = ui.column(); hero.setGravity(Gravity.CENTER_HORIZONTAL);
+        android.graphics.drawable.GradientDrawable wash = new android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{getColor(R.color.farm_hero), getColor(R.color.farm_card)});
+        wash.setCornerRadius(ui.dp(28)); hero.setBackground(wash);
+        hero.setPadding(ui.dp(20), ui.dp(28), ui.dp(20), ui.dp(24));
         FrameLayout stage = new FrameLayout(this);
-        badge = new FrameLayout(this); badge.setBackground(ui.oval(R.color.farm_tint));
+        badge = new FrameLayout(this); badge.setBackground(ui.oval(R.color.farm_tint)); badge.setElevation(ui.dp(2));
         mark = new ImageView(this); mark.setImageResource(R.drawable.ic_qr);
         badge.addView(mark, new FrameLayout.LayoutParams(ui.dp(48), ui.dp(48), Gravity.CENTER));
-        stage.addView(badge, new FrameLayout.LayoutParams(ui.dp(120), ui.dp(120), Gravity.CENTER));
-        LinearLayout.LayoutParams stageParams = new LinearLayout.LayoutParams(-1, ui.dp(168)); stageParams.topMargin = ui.dp(20);
-        content.addView(stage, stageParams);
+        stage.addView(badge, new FrameLayout.LayoutParams(ui.dp(112), ui.dp(112), Gravity.CENTER));
+        hero.addView(stage, new LinearLayout.LayoutParams(-1, ui.dp(128)));
         status = ui.strong("", 20); status.setGravity(Gravity.CENTER); status.setId(R.id.wx_login_status);
-        status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE); ui.add(content, status, 6);
-        detail = ui.text("", 14, R.color.farm_muted); detail.setGravity(Gravity.CENTER); ui.add(content, detail, 24);
+        status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE); ui.add(hero, status, 6);
+        detail = ui.text("", 14, R.color.farm_muted); detail.setGravity(Gravity.CENTER); ui.add(hero, detail, 0);
+        ui.add(content, hero, 16);
         primary = ui.button(content, "", Ui.Tone.PRIMARY, this::primaryAction);
         secondary = ui.button(content, "", Ui.Tone.TONAL, this::secondaryAction);
         LinearLayout links = ui.row(); links.setGravity(Gravity.CENTER);
@@ -79,6 +85,7 @@ public final class WxLoginActivity extends AppCompatActivity {
         ui.add(content, links, 0);
         render();
     }
+    @Override protected void onResume() { super.onResume(); Ui.secure(getWindow()); }
     @Override protected void onStart() { super.onStart(); model.listener = this::render; render(); }
     @Override protected void onStop() { model.listener = null; super.onStop(); }
     private void render() {

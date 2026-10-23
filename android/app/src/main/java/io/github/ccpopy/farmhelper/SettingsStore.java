@@ -47,6 +47,12 @@ public final class SettingsStore {
     public void accelerated(boolean enabled) { prefs.edit().putBoolean("accelerated", enabled).apply(); }
     public void mirror(String base) { prefs.edit().putString("mirror", base).apply(); }
     public void pollSeconds(int seconds) { prefs.edit().putInt("pollSeconds", Math.max(1, seconds)).apply(); }
+    /** The user's on/off choice for offline alerts; the service only runs while at least one account is selected. */
+    public boolean monitorEnabled() { return prefs.getBoolean("monitorEnabled", false); }
+    public void monitorEnabled(boolean enabled) { prefs.edit().putBoolean("monitorEnabled", enabled).apply(); }
+    /** Screenshots and screen recording are blocked unless the user explicitly allows them. */
+    public boolean allowScreenshots() { return prefs.getBoolean("allowScreenshots", false); }
+    public void allowScreenshots(boolean allowed) { prefs.edit().putBoolean("allowScreenshots", allowed).apply(); }
     public boolean accelerated() { return prefs.getBoolean("accelerated", true); }
     public String mirror() { return prefs.getString("mirror", "https://ghfast.top"); }
     public String targetId() { return prefs.getString("targetId", ""); }

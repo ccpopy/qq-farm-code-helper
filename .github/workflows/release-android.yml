@@ -1,0 +1,125 @@
+name: Release Android packages
+
+on:
+  push:
+    tags:
+      - 'android-v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-android-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-android:
+    name: Build and publish signed APK and AAB
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version and release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_TAG -notmatch '^android-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$') {
+            throw 'Release tag must be android-vX.Y.Z.'
+          }
+          $version = $Matches[1]
+          "ANDROID_VERSION=$version" >> $env:GITHUB_ENV
+          $escapedTag = [Regex]::Escape($env:RELEASE_TAG)
+          $changelog = Get-Content android/CHANGELOG.md -Raw -Encoding UTF8
+          $section = [Regex]::Match($changelog, "(?ms)^##\s+$escapedTag\s*\r?\n(?<body>.*?)(?=^##\s+|\z)")
+          if (-not $section.Success) { throw 'The Android changelog must contain this release tag.' }
+          New-Item -ItemType Directory -Path outputs/android/release -Force | Out-Null
+          [IO.File]::WriteAllText((Join-Path $PWD 'outputs/android/release-notes.md'), $section.Groups['body'].Value.Trim(), [Text.UTF8Encoding]::new($false))
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install pinned Android build tools
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $spec = Get-Content android/native/tunnel-build.json -Raw | ConvertFrom-Json
+          & sdkmanager 'platforms;android-36' 'build-tools;36.0.0' "ndk;$($spec.ndkVersion)"
+          if ($LASTEXITCODE -ne 0) { throw 'Android SDK installation failed.' }
+
+      - name: Restore persistent signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:ANDROID_KEYSTORE_BASE64) { throw 'The existing FarmHelper signing key is required; no replacement key will be generated.' }
+          $keyPath = Join-Path $env:RUNNER_TEMP 'farm-helper-release.jks'
+          [IO.File]::WriteAllBytes($keyPath, [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
+          "ANDROID_KEYSTORE_PATH=$keyPath" >> $env:GITHUB_ENV
+
+      - name: Build and verify release packages
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          ./scripts/build-android.ps1 -Configuration Release -Version $env:ANDROID_VERSION -Bundle -JdkDirectory $env:JAVA_HOME -SdkDirectory $env:ANDROID_HOME
+
+      - name: Prepare checksums
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assetName = "QQFarmCodeHelper-$($env:RELEASE_TAG)"
+          $lines = foreach ($extension in @('apk', 'aab')) {
+            $file = Get-Item "outputs/android/$assetName.$extension"
+            Copy-Item -LiteralPath $file.FullName -Destination outputs/android/release/
+            "$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($file.Name)"
+          }
+          [IO.File]::WriteAllText((Join-Path $PWD 'outputs/android/release/SHA256SUMS.txt'), ($lines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
+
+      - name: Retain build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.ref_name }}
+          path: |
+            outputs/android/release/*
+            android/app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish Android release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = @(Get-ChildItem outputs/android/release -File | ForEach-Object FullName)
+          $existing = & gh release view $env:RELEASE_TAG --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if (-not ($existing | ConvertFrom-Json).isDraft) { throw 'This release is already published; use a new version instead of replacing its assets.' }
+            & gh release edit $env:RELEASE_TAG --title "农场助手 Android $env:ANDROID_VERSION" --notes-file outputs/android/release-notes.md
+            if ($LASTEXITCODE -ne 0) { throw 'Updating draft release notes failed.' }
+            & gh release upload $env:RELEASE_TAG @assets --clobber
+          } else {
+            & gh release create $env:RELEASE_TAG @assets --verify-tag --draft --title "农场助手 Android $env:ANDROID_VERSION" --notes-file outputs/android/release-notes.md
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Uploading release assets failed.' }
+          & gh release edit $env:RELEASE_TAG --draft=false --prerelease=false --latest=false
+          if ($LASTEXITCODE -ne 0) { throw 'Publishing Android release failed.' }
+
+      - name: Remove temporary signing key
+        if: always()
+        run: |
+          $keyPath = Join-Path $env:RUNNER_TEMP 'farm-helper-release.jks'
+          if (Test-Path -LiteralPath $keyPath) { Remove-Item -LiteralPath $keyPath -Force }

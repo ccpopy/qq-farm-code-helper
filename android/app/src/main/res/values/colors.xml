@@ -12,4 +12,6 @@
     <color name="farm_amber">#B26A0E</color>
     <color name="farm_amber_tint">#FBEFDC</color>
     <color name="farm_danger">#B3261E</color>
+    <color name="farm_danger_tint">#FBE9E7</color>
+    <color name="farm_hero">#E2F1E7</color>
 </resources>

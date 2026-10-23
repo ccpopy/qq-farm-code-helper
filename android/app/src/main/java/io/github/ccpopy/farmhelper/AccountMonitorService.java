@@ -21,12 +21,16 @@ public final class AccountMonitorService extends Service {
     private final Map<String, String> delivered = new HashMap<>();
     private volatile boolean active;
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent == null || "STOP".equals(intent.getAction())) { stopSelf(); return START_NOT_STICKY; }
+        if (intent == null || "STOP".equals(intent.getAction())) {
+            // The notification's stop action turns the feature off, matching the in-app switch.
+            if (intent != null) AppState.settings.monitorEnabled(false);
+            stopSelf(); return START_NOT_STICKY;
+        }
         if (active) return START_NOT_STICKY;
         Set<String> selected = AppState.settings.monitoredIds();
-        if (selected.isEmpty()) { AppState.log("通知", "请先选择需要提醒的服务器账号"); stopSelf(); return START_NOT_STICKY; }
+        if (selected.isEmpty()) { stopSelf(); return START_NOT_STICKY; }
         startForeground(12, Notifications.ongoing(this, AccountMonitorService.class, "账号通知已开启",
-                "监听 " + selected.size() + " 个账号 · 点击停止可结束后台通知", 12));
+                "正在提醒 " + selected.size() + " 个账号", 12));
         active = true; AppState.monitoring = true; AppState.monitorDetail = "正在首次检查"; AppState.monitorLastCheckedAt = 0; AppState.changed();
         AppState.log("通知", "开始监听服务器下线事件；旧版服务器回退为定时检查，不依赖 VPN");
         scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -75,7 +79,7 @@ public final class AccountMonitorService extends Service {
             AppState.monitorDetail = "检查成功；等待下次检查"; AppState.changed();
         } catch (ApiClient.AuthException invalidToken) {
             if (!active) return;
-            transitions.interrupted(); active = false;
+            transitions.interrupted(); active = false; AppState.settings.monitorEnabled(false);
             AppState.monitorDetail = "服务器 Token 已失效或权限不足，通知已停止；这不代表游戏账号失效";
             AppState.log("通知", "服务器认证失败，已停止检查；请更新管理 Token 后手动开启");
             Notifications.serverAuth(this); AppState.changed(); stopSelf();

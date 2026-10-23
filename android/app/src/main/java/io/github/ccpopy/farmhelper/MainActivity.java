@@ -74,7 +74,8 @@ public final class MainActivity extends AppCompatActivity {
     // Accounts page
     private LinearLayout accountList;
     private MaterialSwitch monitorSwitch;
-    private TextView monitorStatus;
+    private TextView monitorStatus, accountTitle;
+    private MaterialButton selectAll;
     private static List<ApiClient.Account> accountCache = new ArrayList<>();
     private static final Map<String, Boolean> onlineCache = new HashMap<>();
     private static String accountCacheConnection = "";
@@ -86,7 +87,7 @@ public final class MainActivity extends AppCompatActivity {
     @Override protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         ui = new Ui(this);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        Ui.secure(getWindow());
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         root = ui.column(); root.setBackgroundColor(getColor(R.color.farm_surface));
         root.setId(R.id.screen_root); root.setFocusableInTouchMode(true);
@@ -132,7 +133,10 @@ public final class MainActivity extends AppCompatActivity {
         navigation.setSelectedItemId(navId(page)); showPage();
         handleIntent(getIntent());
     }
-    @Override protected void onResume() { super.onResume(); AppState.listen(listener); refresh(); if (page == 2) loadAccounts(); }
+    @Override protected void onResume() {
+        super.onResume(); Ui.secure(getWindow()); AppState.listen(listener); syncMonitor(false); refresh();
+        if (page == 2) loadAccounts();
+    }
     @Override protected void onPause() { AppState.unlisten(listener); super.onPause(); }
     @Override protected void onDestroy() { if (breathing != null) breathing.cancel(); super.onDestroy(); }
     @Override protected void onSaveInstanceState(Bundle state) {
@@ -171,7 +175,7 @@ public final class MainActivity extends AppCompatActivity {
     private void showPage() {
         if (breathing != null) { breathing.cancel(); breathing = null; }
         core = null; halo = null; coreIcon = null; ringLabel = ringStatus = null; appButton = null; segment = resultSlot = null; resultKey = null;
-        accountList = null; monitorSwitch = null; monitorStatus = null; logs = connections = null;
+        accountList = null; monitorSwitch = null; monitorStatus = accountTitle = null; selectAll = null; logs = connections = null;
         content.removeAllViews();
         switch (page) { case 1: capturePage(); break; case 2: accountsPage(); break; case 3: logsPage(); break; default: settingsPage(); }
         scroll.scrollTo(0, 0); refresh();
@@ -189,82 +193,100 @@ public final class MainActivity extends AppCompatActivity {
         CapturePlatform platform = AppState.settings.capturePlatform();
         boolean scan = platform == CapturePlatform.WECHAT && !wechatVpn;
         header("农场助手");
-        segment = ui.row(); segment.setBackground(ui.shape(R.color.farm_line, 16)); segment.setPadding(ui.dp(4), ui.dp(4), ui.dp(4), ui.dp(4));
-        for (CapturePlatform option : CapturePlatform.values()) {
-            TextView tab = ui.text(option.label, 15, R.color.farm_muted); tab.setGravity(Gravity.CENTER);
-            tab.setMinHeight(ui.dp(42)); tab.setTag(option); tab.setFocusable(true);
-            tab.setOnClickListener(v -> choosePlatform(option));
-            segment.addView(tab, new LinearLayout.LayoutParams(0, -2, 1));
-        }
-        ui.add(content, segment, 12);
+        segment = segmented(new String[]{"QQ", "微信"}, platform.ordinal(), which -> choosePlatform(CapturePlatform.values()[which]));
+        ui.add(content, segment, 10);
         if (AppState.settings.server().isEmpty() || !AppState.settings.hasToken())
             banner("还没有连接服务器", "去设置", this::configureServer);
         else if (!scan && !AppState.settings.passthrough() && !new CertificateManager(this).exists())
             banner("首次使用需要安装证书", "安装", this::certificateSheet);
 
+        // The hero: one soft panel holding the single action of this screen.
+        LinearLayout hero = ui.column(); hero.setGravity(Gravity.CENTER_HORIZONTAL);
+        android.graphics.drawable.GradientDrawable wash = new android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{getColor(R.color.farm_hero), getColor(R.color.farm_card)});
+        wash.setCornerRadius(ui.dp(28)); hero.setBackground(wash);
+        hero.setPadding(ui.dp(20), ui.dp(16), ui.dp(20), ui.dp(24));
+        if (platform == CapturePlatform.WECHAT) {
+            LinearLayout mode = segmented(new String[]{"扫码登录", "VPN 获取"}, wechatVpn ? 1 : 0, which -> {
+                if (AppState.capturing) { message("请先停止获取"); return; }
+                if (wechatVpn != (which == 1)) { wechatVpn = which == 1; showPage(); }
+            });
+            ((LinearLayout.LayoutParams) mode.getLayoutParams()).width = ui.dp(220);
+            mode.setBackground(ui.shape(R.color.farm_card, 14));
+            hero.addView(mode);
+        }
         FrameLayout stage = new FrameLayout(this);
         halo = new View(this); halo.setBackground(ui.oval(R.color.farm_tint));
-        stage.addView(halo, new FrameLayout.LayoutParams(ui.dp(208), ui.dp(208), Gravity.CENTER));
+        stage.addView(halo, new FrameLayout.LayoutParams(ui.dp(176), ui.dp(176), Gravity.CENTER));
         core = new FrameLayout(this); core.setId(scan ? R.id.wx_login : R.id.capture_toggle);
-        core.setElevation(ui.dp(2)); core.setClipToOutline(true); ui.ripple(core);
+        core.setElevation(ui.dp(3)); core.setClipToOutline(true); ui.ripple(core);
         coreIcon = new ImageView(this);
-        core.addView(coreIcon, new FrameLayout.LayoutParams(ui.dp(52), ui.dp(52), Gravity.CENTER));
+        core.addView(coreIcon, new FrameLayout.LayoutParams(ui.dp(48), ui.dp(48), Gravity.CENTER));
         core.setOnClickListener(v -> { if (scan) openWxLogin(); else toggleVpn(); });
-        stage.addView(core, new FrameLayout.LayoutParams(ui.dp(148), ui.dp(148), Gravity.CENTER));
-        LinearLayout.LayoutParams stageParams = new LinearLayout.LayoutParams(-1, ui.dp(236)); stageParams.topMargin = ui.dp(12);
-        content.addView(stage, stageParams);
-        ringLabel = ui.strong("", 20); ringLabel.setGravity(Gravity.CENTER); ui.add(content, ringLabel, 4);
+        stage.addView(core, new FrameLayout.LayoutParams(ui.dp(128), ui.dp(128), Gravity.CENTER));
+        LinearLayout.LayoutParams stageParams = new LinearLayout.LayoutParams(-1, ui.dp(200)); stageParams.topMargin = ui.dp(8);
+        hero.addView(stage, stageParams);
+        ringLabel = ui.strong("", 20); ringLabel.setGravity(Gravity.CENTER); ui.add(hero, ringLabel, 4);
         ringStatus = ui.text("", 13, R.color.farm_muted); ringStatus.setGravity(Gravity.CENTER);
-        ringStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE); ui.add(content, ringStatus, 6);
-        LinearLayout links = ui.row(); links.setGravity(Gravity.CENTER);
-        if (!scan) appButton = ui.button(links, "打开 " + platform.label, Ui.Tone.TEXT, () -> {
+        ringStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE); ui.add(hero, ringStatus, 0);
+        ui.add(content, hero, 12);
+
+        LinearLayout actions = ui.row();
+        if (!scan) appButton = ui.button(actions, "打开 " + platform.label, Ui.Tone.TONAL, R.drawable.ic_open, () -> {
             if (AppState.capturing && !AppState.captureReady) { message("VPN 正在准备，请稍候"); return; }
             Intent launch = getPackageManager().getLaunchIntentForPackage(platform.packageName);
             if (launch == null) message("未安装 " + platform.label); else startActivity(launch);
         });
-        if (platform == CapturePlatform.WECHAT) ui.button(links, scan ? "改用 VPN 获取" : "改用扫码登录", Ui.Tone.TEXT, () -> {
-            if (AppState.capturing) { message("请先停止获取"); return; }
-            wechatVpn = !wechatVpn; showPage();
-        });
-        ui.add(content, links, 12);
+        ui.button(actions, "手动导入", Ui.Tone.TONAL, R.drawable.ic_edit, () -> manual(""));
+        for (int i = 0; i < actions.getChildCount(); i++) ((MaterialButton) actions.getChildAt(i)).setMinHeight(ui.dp(48));
+        ui.add(content, actions, 12);
         resultSlot = ui.column(); ui.add(content, resultSlot, 0);
-        LinearLayout footer = ui.row(); footer.setGravity(Gravity.CENTER);
-        ui.button(footer, "手动导入", Ui.Tone.TEXT, () -> manual(""));
-        ui.add(content, footer, 0);
+    }
+    private interface Choice { void pick(int which); }
+    /** Pill segmented control; the selected option sits on a raised card. */
+    private LinearLayout segmented(String[] labels, int selected, Choice choice) {
+        LinearLayout group = ui.row(); group.setBackground(ui.shape(R.color.farm_line, 16));
+        group.setPadding(ui.dp(4), ui.dp(4), ui.dp(4), ui.dp(4));
+        for (int i = 0; i < labels.length; i++) {
+            int which = i; boolean on = i == selected;
+            TextView tab = ui.text(labels[i], 15, on ? R.color.farm_ink : R.color.farm_muted); tab.setGravity(Gravity.CENTER);
+            tab.setMinHeight(ui.dp(40)); tab.setSelected(on);
+            tab.setTypeface(on ? Ui.MEDIUM : Typeface.DEFAULT);
+            if (on) { tab.setBackground(ui.shape(R.color.farm_card, 12)); tab.setElevation(ui.dp(1)); }
+            ui.ripple(tab); tab.setOnClickListener(v -> choice.pick(which));
+            group.addView(tab, new LinearLayout.LayoutParams(0, -2, 1));
+        }
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.gravity = Gravity.CENTER_HORIZONTAL;
+        group.setLayoutParams(params); return group;
     }
     private void banner(String title, String action, Runnable click) {
         LinearLayout box = ui.row(); box.setBackground(ui.shape(R.color.farm_amber_tint, 16));
-        box.setPadding(ui.dp(16), ui.dp(4), ui.dp(4), ui.dp(4));
+        box.setPadding(ui.dp(16), ui.dp(8), ui.dp(8), ui.dp(8));
         TextView label = ui.text(title, 14, R.color.farm_amber); label.setTypeface(Ui.MEDIUM);
         box.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
-        MaterialButton go = ui.button(action, Ui.Tone.TEXT, click); go.setTextColor(getColor(R.color.farm_amber));
-        box.addView(go); ui.add(content, box, 4);
+        MaterialButton go = ui.button(box, action, Ui.Tone.TEXT, click);
+        go.setBackgroundTintList(ColorStateList.valueOf(getColor(R.color.farm_card))); go.setTextColor(getColor(R.color.farm_amber));
+        ui.add(content, box, 10);
     }
     private void refreshCapture() {
         CapturePlatform platform = AppState.settings.capturePlatform();
         boolean scan = platform == CapturePlatform.WECHAT && !wechatVpn;
         boolean running = AppState.capturing && !scan;
         AppState.Capture result = AppState.capture();
-        for (int i = 0; i < segment.getChildCount(); i++) {
-            TextView tab = (TextView) segment.getChildAt(i); boolean selected = tab.getTag() == platform;
-            tab.setBackground(selected ? ui.shape(R.color.farm_card, 12) : null);
-            tab.setTextColor(getColor(selected ? R.color.farm_ink : R.color.farm_muted));
-            tab.setTypeface(selected ? Ui.MEDIUM : Typeface.DEFAULT); tab.setSelected(selected);
-            tab.setAlpha(AppState.capturing && !selected ? .5f : 1f);
-        }
+        segment.setAlpha(AppState.capturing ? .6f : 1f);
         boolean done = !running && result != null && !scan;
         core.setBackground(ui.oval(running || done ? R.color.farm_accent : R.color.farm_card));
         coreIcon.setImageResource(scan ? R.drawable.ic_qr : done ? R.drawable.ic_check : R.drawable.ic_power);
         coreIcon.setImageTintList(ColorStateList.valueOf(getColor(running || done ? R.color.farm_on_accent : R.color.farm_accent)));
-        String label = scan ? "微信扫码登录" : running ? "停止获取" : AppState.settings.passthrough() ? "开始透传诊断" : "开始获取";
+        String label = scan ? "扫码登录" : running ? "停止获取" : AppState.settings.passthrough() ? "开始透传诊断" : "开始获取";
         ringLabel.setText(label); core.setContentDescription(label);
-        ringStatus.setText(scan ? "" : AppState.capturing || result != null ? AppState.status
-                : AppState.settings.passthrough() ? "只测试联网，不获取 Code" : "启动后进入 " + platform.label + " 农场");
-        ringStatus.setVisibility(ringStatus.length() == 0 ? View.GONE : View.VISIBLE);
-        if (appButton != null) appButton.setVisibility(AppState.capturing ? View.VISIBLE : View.GONE);
+        ringStatus.setText(scan ? "通过服务器生成登录二维码" : AppState.capturing || result != null ? AppState.status
+                : AppState.settings.passthrough() ? "只测试联网，不获取 Code" : "点击后进入 " + platform.label + " 农场");
+        if (appButton != null) appButton.setEnabled(!AppState.capturing || AppState.captureReady);
         if (running && breathing == null) {
-            breathing = ObjectAnimator.ofPropertyValuesHolder(halo, PropertyValuesHolder.ofFloat(View.SCALE_X, .86f, 1.04f),
-                    PropertyValuesHolder.ofFloat(View.SCALE_Y, .86f, 1.04f), PropertyValuesHolder.ofFloat(View.ALPHA, 1f, .55f));
+            breathing = ObjectAnimator.ofPropertyValuesHolder(halo, PropertyValuesHolder.ofFloat(View.SCALE_X, .82f, 1.06f),
+                    PropertyValuesHolder.ofFloat(View.SCALE_Y, .82f, 1.06f), PropertyValuesHolder.ofFloat(View.ALPHA, 1f, .5f));
             breathing.setDuration(1300); breathing.setRepeatCount(ObjectAnimator.INFINITE); breathing.setRepeatMode(ObjectAnimator.REVERSE);
             breathing.start();
         } else if (!running && breathing != null) {
@@ -279,7 +301,9 @@ public final class MainActivity extends AppCompatActivity {
         LinearLayout body = ui.padded(ui.card(resultSlot));
         LinearLayout title = ui.row();
         title.addView(ui.strong("本次结果", 16), new LinearLayout.LayoutParams(0, -2, 1));
-        title.addView(ui.text(result.platform().label, 13, R.color.farm_muted));
+        TextView chip = ui.text(result.platform().label, 12, R.color.farm_accent); chip.setTypeface(Ui.MEDIUM);
+        chip.setBackground(ui.shape(R.color.farm_tint, 10)); chip.setPadding(ui.dp(10), ui.dp(3), ui.dp(10), ui.dp(3));
+        title.addView(chip);
         ui.add(body, title, 12);
         LinearLayout facts = ui.row();
         fact(facts, result.code().isEmpty() ? "—" : "已获取", "Code");
@@ -287,15 +311,19 @@ public final class MainActivity extends AppCompatActivity {
         fact(facts, result.ownGid().isEmpty() ? "—" : "已识别", "身份");
         ui.add(body, facts, 14);
         LinearLayout actions = ui.row();
-        MaterialButton push = ui.button(actions, "推送到服务器", Ui.Tone.PRIMARY, () -> syncCapture(false));
+        MaterialButton push = ui.button(actions, "推送到服务器", Ui.Tone.PRIMARY, R.drawable.ic_upload, () -> syncCapture(false));
         push.setEnabled(!AppState.capturing);
-        ui.button(actions, "清除", Ui.Tone.TEXT, AppState::clearCapture);
+        MaterialButton clear = ui.button(actions, "清除", Ui.Tone.DANGER, AppState::clearCapture);
+        clear.setMinHeight(ui.dp(52));
         ui.add(body, actions, 0);
     }
     private void fact(LinearLayout parent, String value, String label) {
-        LinearLayout cell = ui.column();
-        cell.addView(ui.strong(value, 18)); cell.addView(ui.text(label, 12, R.color.farm_muted));
-        parent.addView(cell, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout cell = ui.column(); cell.setBackground(ui.shape(R.color.farm_surface, 14));
+        cell.setPadding(ui.dp(12), ui.dp(10), ui.dp(12), ui.dp(10));
+        cell.addView(ui.strong(value, 17)); cell.addView(ui.text(label, 12, R.color.farm_muted));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+        if (parent.getChildCount() > 0) params.setMarginStart(ui.dp(8));
+        parent.addView(cell, params);
     }
     private void choosePlatform(CapturePlatform platform) {
         if (platform == AppState.settings.capturePlatform()) return;
@@ -432,7 +460,7 @@ public final class MainActivity extends AppCompatActivity {
         Ui.field(name).setHelperText("会自动附加随机后缀，避免与同名账号混淆");
         var dialog = new MaterialAlertDialogBuilder(this).setTitle("新增" + capture.platform().label + "账号")
                 .setView(form).setNegativeButton("取消", null).setPositiveButton("新增", null).create();
-        dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        Ui.secure(dialog.getWindow());
         dialog.setOnShowListener(ignored -> dialog.getButton(-1).setOnClickListener(view -> {
             String baseName, actualName;
             try { baseName = AccountNamePolicy.base(Ui.value(name)); actualName = AccountNamePolicy.unique(baseName, nonce); Ui.field(name).setError(null); }
@@ -476,7 +504,7 @@ public final class MainActivity extends AppCompatActivity {
         ScrollView formScroll = new ScrollView(this); formScroll.addView(form);
         var dialog = new MaterialAlertDialogBuilder(this).setTitle("手动导入 · " + platform.label).setView(formScroll)
                 .setNegativeButton("取消", null).setPositiveButton("导入", null).create();
-        dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        Ui.secure(dialog.getWindow());
         dialog.setOnShowListener(d -> dialog.getButton(-1).setOnClickListener(v -> {
             try {
                 if (platform != AppState.settings.capturePlatform()) throw new IllegalStateException("平台已变化，请重新导入");
@@ -496,18 +524,45 @@ public final class MainActivity extends AppCompatActivity {
         bar.addView(ui.iconButton(R.drawable.ic_refresh, R.color.farm_ink, "刷新", this::loadAccounts));
         LinearLayout alerts = ui.card(content);
         monitorSwitch = new MaterialSwitch(this); monitorSwitch.setContentDescription("掉线提醒");
-        monitorStatus = ui.listRow(alerts, "掉线提醒", "", monitorSwitch, () -> monitorSwitch.toggle());
+        monitorStatus = ui.listRow(alerts, ui.icon(R.drawable.ic_bell, R.color.farm_accent, 22), "掉线提醒", "", monitorSwitch, () -> monitorSwitch.toggle());
         monitorSwitch.setOnCheckedChangeListener((button, on) -> { if (button.getTag() == null) setMonitoring(on); });
-        ui.section(content, "服务器账号");
+        LinearLayout heading = ui.row(); heading.setPadding(ui.dp(6), ui.dp(16), 0, ui.dp(8));
+        accountTitle = ui.text("服务器账号", 13, R.color.farm_muted); accountTitle.setTypeface(Ui.MEDIUM);
+        heading.addView(accountTitle, new LinearLayout.LayoutParams(0, -2, 1));
+        selectAll = ui.button(heading, "全选", Ui.Tone.TEXT, this::toggleAllWatched);
+        ui.withIcon(selectAll, R.drawable.ic_select_all); selectAll.setMinHeight(ui.dp(36)); selectAll.setMinimumHeight(ui.dp(36));
+        ui.add(content, heading, 0);
         accountList = ui.column(); ui.add(content, accountList, 0);
         if (!accountCacheConnection.equals(AppState.settings.connectionId())) { accountCache = new ArrayList<>(); onlineCache.clear(); }
         renderAccounts(); loadAccounts();
     }
     private void setMonitoring(boolean on) {
-        if (!on) { stopService(new Intent(this, AccountMonitorService.class)); return; }
-        if (!requireServer()) { refresh(); return; }
-        if (AppState.settings.monitoredIds().isEmpty()) { message("点账号右侧的铃铛，选择要提醒的账号"); refresh(); return; }
-        notificationPermission(() -> startForegroundService(new Intent(this, AccountMonitorService.class).setAction("START")));
+        if (on && !requireServer()) { refresh(); return; }
+        AppState.settings.monitorEnabled(on);
+        syncMonitor(on); refresh();
+    }
+    /**
+     * Run the alert service exactly when the switch is on and at least one account is selected.
+     * An enabled switch with nothing selected simply alerts nobody.
+     */
+    private void syncMonitor(boolean askPermission) {
+        boolean want = AppState.settings.monitorEnabled() && !AppState.settings.monitoredIds().isEmpty()
+                && !AppState.settings.server().isEmpty() && AppState.settings.hasToken();
+        if (!want) { if (AppState.monitoring) stopService(new Intent(this, AccountMonitorService.class)); return; }
+        if (AppState.monitoring) return;
+        Runnable start = () -> startForegroundService(new Intent(this, AccountMonitorService.class).setAction("START"));
+        if (notificationsAllowed()) start.run(); else if (askPermission) notificationPermission(start);
+    }
+    private boolean notificationsAllowed() {
+        return (Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
+                && NotificationManagerCompat.from(this).areNotificationsEnabled();
+    }
+    private void toggleAllWatched() {
+        Set<String> watched = AppState.settings.monitoredIds();
+        boolean all = !accountCache.isEmpty() && accountCache.stream().allMatch(a -> watched.contains(a.id));
+        for (ApiClient.Account account : accountCache) { if (all) watched.remove(account.id); else watched.add(account.id); }
+        AppState.settings.monitor(watched); syncMonitor(false);
+        renderAccounts(); refresh();
     }
     private void loadAccounts() {
         if (AppState.settings.server().isEmpty() || !AppState.settings.hasToken()) { renderAccounts(); return; }
@@ -538,7 +593,10 @@ public final class MainActivity extends AppCompatActivity {
     private void renderAccounts() {
         if (accountList == null) return;
         accountList.removeAllViews();
-        if (AppState.settings.server().isEmpty() || !AppState.settings.hasToken()) {
+        boolean configured = !AppState.settings.server().isEmpty() && AppState.settings.hasToken();
+        selectAll.setVisibility(configured && !accountCache.isEmpty() ? View.VISIBLE : View.GONE);
+        accountTitle.setText(accountCache.isEmpty() ? "服务器账号" : "服务器账号 · " + accountCache.size());
+        if (!configured) {
             LinearLayout body = ui.padded(ui.card(accountList));
             ui.add(body, ui.text("连接服务器后，这里会显示账号和在线状态。", 14, R.color.farm_muted), 12);
             ui.button(body, "去设置", Ui.Tone.TONAL, this::configureServer); return;
@@ -549,25 +607,27 @@ public final class MainActivity extends AppCompatActivity {
             return;
         }
         Set<String> watched = AppState.settings.monitoredIds();
+        boolean all = accountCache.stream().allMatch(a -> watched.contains(a.id));
+        selectAll.setText(all ? "全不选" : "全选");
         LinearLayout card = ui.card(accountList);
         for (ApiClient.Account account : accountCache) {
             Boolean online = onlineCache.get(account.id);
             boolean bell = watched.contains(account.id);
-            ImageView toggle = ui.iconButton(R.drawable.ic_bell, bell ? R.color.farm_accent : R.color.farm_line_strong,
+            ImageView toggle = ui.iconButton(bell ? R.drawable.ic_bell : R.drawable.ic_bell_off, bell ? R.color.farm_accent : R.color.farm_line_strong,
                     bell ? "关闭 " + account.name + " 的掉线提醒" : "开启 " + account.name + " 的掉线提醒", () -> toggleWatch(account));
+            if (bell) toggle.setBackground(ui.oval(R.color.farm_tint));
             String platform = account.platform.equals("wx") ? "微信" : account.platform.equals("qq") ? "QQ" : account.platform;
             String state = online == null ? (account.running ? "检查中" : "已停止") : online ? "在线" : "离线";
-            TextView sub = ui.listRow(card, account.name, platform + " · " + state, toggle, () -> relogin(account));
-            sub.setTextColor(getColor(online == null ? R.color.farm_muted : online ? R.color.farm_accent : R.color.farm_danger));
+            int tone = online == null ? R.color.farm_line_strong : online ? R.color.farm_accent : R.color.farm_danger;
+            ui.listRow(card, ui.dot(tone), account.name, platform + " · " + state, toggle, () -> relogin(account));
         }
-        ui.add(accountList, ui.text("点账号可重新登录；铃铛决定是否提醒掉线。", 12, R.color.farm_muted), 0);
-        ((TextView) accountList.getChildAt(accountList.getChildCount() - 1)).setPadding(ui.dp(6), ui.dp(8), ui.dp(6), 0);
+        TextView hint = ui.text("点账号重新登录，点铃铛开关该账号的掉线提醒。", 12, R.color.farm_muted);
+        hint.setPadding(ui.dp(6), ui.dp(10), ui.dp(6), 0); ui.add(accountList, hint, 0);
     }
     private void toggleWatch(ApiClient.Account account) {
         Set<String> watched = AppState.settings.monitoredIds();
         if (!watched.remove(account.id)) watched.add(account.id);
-        AppState.settings.monitor(watched);
-        if (watched.isEmpty()) stopService(new Intent(this, AccountMonitorService.class));
+        AppState.settings.monitor(watched); syncMonitor(false);
         renderAccounts(); refresh();
     }
     private void relogin(ApiClient.Account account) {
@@ -586,19 +646,24 @@ public final class MainActivity extends AppCompatActivity {
     // ---------------------------------------------------------------- 日志
     private void logsPage() {
         LinearLayout bar = header("日志");
-        bar.addView(ui.button("导出", Ui.Tone.TEXT, () -> export("logs")));
-        bar.addView(ui.button("清空", Ui.Tone.TEXT, AppState::clearLogs));
+        LinearLayout tools = ui.row();
+        ui.button(tools, "导出", Ui.Tone.TEXT, R.drawable.ic_download, () -> export("logs"));
+        ui.button(tools, "清空", Ui.Tone.DANGER, R.drawable.ic_delete, AppState::clearLogs);
+        bar.addView(tools);
         LinearLayout body = ui.padded(ui.card(content));
         logs = ui.text("", 12, R.color.farm_ink); logs.setTypeface(Typeface.MONOSPACE); logs.setTextIsSelectable(true);
         logs.setLineSpacing(ui.dp(4), 1); body.addView(logs);
-        ui.section(content, "连接详情");
-        LinearLayout details = ui.padded(ui.card(content));
+        View gap = new View(this); ui.add(content, gap, 12);
+        LinearLayout details = ui.card(content);
+        ImageView arrow = ui.icon(R.drawable.ic_expand, R.color.farm_muted, 22);
+        TextView summary = ui.listRow(details, "连接详情", "TLS 主机与转发统计", arrow, null);
+        View row = (View) summary.getParent().getParent();
         connections = ui.text("", 12, R.color.farm_muted); connections.setTypeface(Typeface.MONOSPACE); connections.setTextIsSelectable(true);
-        connections.setVisibility(View.GONE); details.addView(connections);
-        MaterialButton expand = ui.button(details, "展开", Ui.Tone.TEXT, () -> {});
-        expand.setOnClickListener(v -> {
+        connections.setPadding(ui.dp(16), 0, ui.dp(16), ui.dp(16)); connections.setVisibility(View.GONE); details.addView(connections);
+        ui.ripple(row);
+        row.setOnClickListener(v -> {
             boolean open = connections.getVisibility() != View.VISIBLE;
-            connections.setVisibility(open ? View.VISIBLE : View.GONE); expand.setText(open ? "收起" : "展开");
+            connections.setVisibility(open ? View.VISIBLE : View.GONE); arrow.animate().rotation(open ? 180 : 0).setDuration(160).start();
         });
     }
 
@@ -615,7 +680,7 @@ public final class MainActivity extends AppCompatActivity {
         TextInputEditText token = ui.input(server, AppState.settings.hasToken() ? "管理 Token（已保存，留空不变）" : "管理 Token", "", true);
         token.setId(R.id.server_token);
         MaterialSwitch http = new MaterialSwitch(this); http.setId(R.id.server_http); http.setChecked(AppState.settings.allowHttp());
-        http.setText("允许 HTTP"); http.setTextSize(14); http.setTextColor(getColor(R.color.farm_ink)); http.setMinHeight(ui.dp(44));
+        http.setText("允许 HTTP（明文）"); http.setTextSize(15); http.setTextColor(getColor(R.color.farm_ink)); http.setMinHeight(ui.dp(48));
         http.setOnCheckedChangeListener((button, on) -> {
             if (on && button.isPressed()) new MaterialAlertDialogBuilder(this).setTitle("允许 HTTP？")
                     .setMessage("HTTP 会明文传输管理 Token 和 Code，建议为服务器配置 HTTPS。")
@@ -683,6 +748,12 @@ public final class MainActivity extends AppCompatActivity {
         ui.ripple((View) interval.getParent().getParent());
         ui.listRow(alerts, "通知与后台", null, null, this::permissionSheet);
 
+        ui.section(content, "隐私");
+        LinearLayout privacy = ui.card(content);
+        ui.switchRow(privacy, "允许截图", "关闭时截屏和录屏显示为黑色", AppState.settings.allowScreenshots(), on -> {
+            AppState.settings.allowScreenshots(on); Ui.secure(getWindow());
+        });
+
         ui.section(content, "更新");
         LinearLayout updates = ui.card(content);
         ui.listRow(updates, "检查更新", "当前 v" + BuildConfig.VERSION_NAME, null, this::checkUpdates);
@@ -696,11 +767,12 @@ public final class MainActivity extends AppCompatActivity {
         ui.ripple((View) mirror.getParent().getParent());
         ui.listRow(updates, "源代码", null, null, () -> openWeb("https://github.com/" + UrlPolicy.REPOSITORY));
 
-        LinearLayout danger = ui.row(); danger.setGravity(Gravity.CENTER); danger.setPadding(0, ui.dp(16), 0, 0);
-        ui.button(danger, "清除服务器设置", Ui.Tone.DANGER, () -> new MaterialAlertDialogBuilder(this).setTitle("清除服务器设置？")
+        LinearLayout danger = ui.row(); danger.setGravity(Gravity.CENTER); danger.setPadding(0, ui.dp(20), 0, 0);
+        ui.button(danger, "清除服务器设置", Ui.Tone.DANGER, R.drawable.ic_delete, () -> new MaterialAlertDialogBuilder(this).setTitle("清除服务器设置？")
                 .setMessage("将停止掉线提醒并删除服务器地址和 Token。服务器上的账号与已安装的证书不受影响。")
                 .setNegativeButton("取消", null).setPositiveButton("清除", (d, w) -> {
-                    stopService(new Intent(this, AccountMonitorService.class)); AppState.settings.forgetServer(); AppState.clearCapture(); showPage();
+                    stopService(new Intent(this, AccountMonitorService.class)); AppState.settings.monitorEnabled(false);
+                    AppState.settings.forgetServer(); AppState.clearCapture(); showPage();
                 }).show());
         ui.add(content, danger, 0);
     }
@@ -733,10 +805,12 @@ public final class MainActivity extends AppCompatActivity {
         }
         if (core != null) refreshCapture();
         if (monitorSwitch != null) {
-            monitorSwitch.setTag(Boolean.TRUE); monitorSwitch.setChecked(AppState.monitoring); monitorSwitch.setTag(null);
+            boolean enabled = AppState.settings.monitorEnabled();
+            monitorSwitch.setTag(Boolean.TRUE); monitorSwitch.setChecked(enabled); monitorSwitch.setTag(null);
             int count = AppState.settings.monitoredIds().size();
-            monitorStatus.setText(AppState.monitoring ? "已开启 · " + count + " 个账号" + (AppState.monitorLastCheckedAt == 0 ? "" : " · " + java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(new java.util.Date(AppState.monitorLastCheckedAt)))
-                    : count == 0 ? "未选择账号" : "已选择 " + count + " 个账号");
+            String last = AppState.monitorLastCheckedAt == 0 ? "" : " · " + java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(new java.util.Date(AppState.monitorLastCheckedAt));
+            monitorStatus.setText(!enabled ? (count == 0 ? "已关闭" : "已关闭 · 已选 " + count + " 个账号")
+                    : count == 0 ? "已开启 · 未选择账号" : AppState.monitoring ? "正在提醒 " + count + " 个账号" + last : notificationsAllowed() ? "已开启 · 正在启动" : "已开启 · 需要允许通知");
             monitorStatus.setVisibility(View.VISIBLE);
         }
         if (connections != null) connections.setText(AppState.connectionText());
@@ -762,7 +836,7 @@ public final class MainActivity extends AppCompatActivity {
         LinearLayout frame = ui.column(); frame.setPadding(ui.dp(20), ui.dp(8), ui.dp(20), ui.dp(24));
         TextView heading = ui.strong(title, 20); heading.setPadding(ui.dp(4), 0, 0, ui.dp(12)); frame.addView(heading);
         frame.addView(body); scroller.addView(frame); sheet.setContentView(scroller);
-        sheet.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        Ui.secure(sheet.getWindow());
         return sheet;
     }
     private void certificateSheet() {
@@ -828,7 +902,10 @@ public final class MainActivity extends AppCompatActivity {
         super.onRequestPermissionsResult(request, permissions, results);
         if (request == 11) { Runnable action = afterPermission; afterPermission = null;
             if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED && action != null) action.run();
-            else { message("未允许通知"); refresh(); } }
+            else {
+                if (AppState.settings.monitorEnabled() && !AppState.monitoring) AppState.settings.monitorEnabled(false);
+                message("未允许通知，掉线提醒已关闭"); refresh();
+            } }
     }
     private void export(String type) {
         if (type.equals("certificate") && !new CertificateManager(this).exists()) { message("请先生成证书"); return; }

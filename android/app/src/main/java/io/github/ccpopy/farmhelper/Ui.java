@@ -63,8 +63,15 @@ final class Ui {
     }
     /** A list row: title, optional subtitle, optional trailing control. Returns the subtitle view. */
     TextView listRow(LinearLayout card, String title, String subtitle, View trailing, Runnable click) {
+        return listRow(card, null, title, subtitle, trailing, click);
+    }
+    TextView listRow(LinearLayout card, View leading, String title, String subtitle, View trailing, Runnable click) {
         if (card.getChildCount() > 0) divider(card);
         LinearLayout row = row(); row.setMinimumHeight(dp(56)); row.setPadding(dp(16), dp(10), dp(12), dp(10));
+        if (leading != null) {
+            LinearLayout.LayoutParams params = params(leading); params.setMarginEnd(dp(12));
+            row.addView(leading, params);
+        }
         LinearLayout texts = column();
         texts.addView(text(title, 15, R.color.farm_ink));
         TextView sub = text(subtitle == null ? "" : subtitle, 12, R.color.farm_muted);
@@ -72,11 +79,14 @@ final class Ui {
         row.addView(texts, new LinearLayout.LayoutParams(0, -2, 1));
         if (trailing == null && click != null) trailing = icon(R.drawable.ic_chevron, R.color.farm_line_strong, 20);
         if (trailing != null) {
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2); params.setMarginStart(dp(8));
+            LinearLayout.LayoutParams params = params(trailing); params.setMarginStart(dp(8));
             row.addView(trailing, params);
         }
         if (click != null) { ripple(row); row.setOnClickListener(v -> click.run()); }
         card.addView(row, new LinearLayout.LayoutParams(-1, -2)); return sub;
+    }
+    private static LinearLayout.LayoutParams params(View view) {
+        return view.getLayoutParams() instanceof LinearLayout.LayoutParams ? (LinearLayout.LayoutParams) view.getLayoutParams() : new LinearLayout.LayoutParams(-2, -2);
     }
     /** A switch row; tapping anywhere on the row toggles it. */
     MaterialSwitch switchRow(LinearLayout card, String title, String subtitle, boolean checked, java.util.function.Consumer<Boolean> changed) {
@@ -115,30 +125,54 @@ final class Ui {
         context.getTheme().resolveAttribute(android.R.attr.selectableItemBackground, value, true);
         view.setForeground(androidx.appcompat.content.res.AppCompatResources.getDrawable(context, value.resourceId)); view.setFocusable(true); view.setClickable(true);
     }
+    /**
+     * PRIMARY / TONAL are full-size actions. TEXT and DANGER are compact pills; they still carry a
+     * filled shape so that every tappable control reads as a button, never as plain text.
+     */
     MaterialButton button(String label, Tone tone, Runnable action) {
+        boolean compact = tone == Tone.TEXT || tone == Tone.DANGER;
         MaterialButton view = new MaterialButton(context);
-        view.setText(label); view.setAllCaps(false); view.setTextSize(15); view.setLetterSpacing(0);
-        view.setCornerRadius(dp(16)); view.setMinHeight(dp(52)); view.setInsetTop(0); view.setInsetBottom(0);
-        view.setElevation(0); view.setStateListAnimator(null);
-        int background = tone == Tone.PRIMARY ? R.color.farm_accent : tone == Tone.TONAL ? R.color.farm_tint : 0;
+        view.setText(label); view.setAllCaps(false); view.setTextSize(compact ? 14 : 15); view.setLetterSpacing(0);
+        view.setCornerRadius(dp(compact ? 20 : 16)); view.setMinHeight(dp(compact ? 40 : 52)); view.setMinimumHeight(dp(compact ? 40 : 52));
+        view.setInsetTop(0); view.setInsetBottom(0); view.setElevation(0); view.setStateListAnimator(null);
+        if (compact) view.setPadding(dp(16), 0, dp(16), 0);
+        int background = tone == Tone.PRIMARY ? R.color.farm_accent : tone == Tone.DANGER ? R.color.farm_danger_tint : R.color.farm_tint;
         int foreground = tone == Tone.PRIMARY ? R.color.farm_on_accent : tone == Tone.DANGER ? R.color.farm_danger : R.color.farm_accent;
         int[][] states = {{-android.R.attr.state_enabled}, {}};
-        int fill = background == 0 ? 0 : color(background);
-        int disabledFill = background == 0 ? 0 : (fill & 0x00FFFFFF) | 0x33000000;
-        view.setBackgroundTintList(new ColorStateList(states, new int[]{disabledFill, fill}));
+        int fill = color(background);
+        view.setBackgroundTintList(new ColorStateList(states, new int[]{(fill & 0x00FFFFFF) | 0x55000000, fill}));
         int ink = color(foreground);
-        view.setTextColor(new ColorStateList(states, new int[]{(ink & 0x00FFFFFF) | 0x66000000, ink}));
-        view.setRippleColor(ColorStateList.valueOf((color(tone == Tone.PRIMARY ? R.color.farm_on_accent : R.color.farm_accent) & 0x00FFFFFF) | 0x22000000));
-        if (tone == Tone.TEXT || tone == Tone.DANGER) { view.setMinHeight(dp(44)); view.setPadding(dp(12), 0, dp(12), 0); }
+        ColorStateList inks = new ColorStateList(states, new int[]{(ink & 0x00FFFFFF) | 0x66000000, ink});
+        view.setTextColor(inks); view.setIconTint(inks);
+        view.setRippleColor(ColorStateList.valueOf((ink & 0x00FFFFFF) | 0x22000000));
         view.setOnClickListener(v -> action.run()); return view;
     }
     MaterialButton button(LinearLayout parent, String label, Tone tone, Runnable action) {
         MaterialButton view = button(label, tone, action);
         if (parent.getOrientation() == LinearLayout.HORIZONTAL) {
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(tone == Tone.TEXT || tone == Tone.DANGER ? -2 : 0, -2, tone == Tone.TEXT || tone == Tone.DANGER ? 0 : 1);
+            boolean compact = tone == Tone.TEXT || tone == Tone.DANGER;
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(compact ? -2 : 0, -2, compact ? 0 : 1);
+            if (parent.getChildCount() > 0) params.setMarginStart(dp(8));
             parent.addView(view, params);
         } else add(parent, view, 8);
         return view;
+    }
+    MaterialButton button(LinearLayout parent, String label, Tone tone, int icon, Runnable action) {
+        MaterialButton view = button(parent, label, tone, action); withIcon(view, icon); return view;
+    }
+    void withIcon(MaterialButton view, int icon) {
+        view.setIconResource(icon); view.setIconSize(dp(18)); view.setIconPadding(dp(6));
+        view.setIconGravity(MaterialButton.ICON_GRAVITY_TEXT_START);
+    }
+    /** Screen capture follows the user's privacy setting; blocked (black) by default. */
+    static void secure(android.view.Window window) {
+        if (window == null) return;
+        if (AppState.settings.allowScreenshots()) window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+        else window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+    }
+    View dot(int colorRes) {
+        View dot = new View(context); dot.setBackground(oval(colorRes));
+        dot.setLayoutParams(new LinearLayout.LayoutParams(dp(10), dp(10))); return dot;
     }
     TextInputEditText input(LinearLayout parent, String label, String value, boolean secret) {
         TextInputLayout layout = new TextInputLayout(context); layout.setHint(label);
