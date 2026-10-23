@@ -67,8 +67,12 @@ foreach ($module in $modules) {
 }
 $configSource = Join-Path $source 'src/hev-config.c'
 [IO.File]::WriteAllText($configSource, [IO.File]::ReadAllText($configSource).Replace("`r`n", "`n"))
-Invoke-SourceGit $source @('apply', '--check', $patchFile)
-Invoke-SourceGit $source @('apply', $patchFile)
+# Normalize the patch too: Windows checkouts may otherwise supply CRLF context
+# against the pinned LF native source. The original patch remains a hashed input.
+$normalizedPatch = Join-Path $work 'disable-idle-timeouts.patch'
+[IO.File]::WriteAllText($normalizedPatch, [IO.File]::ReadAllText($patchFile).Replace("`r`n", "`n"), [Text.UTF8Encoding]::new($false))
+Invoke-SourceGit $source @('apply', '--check', $normalizedPatch)
+Invoke-SourceGit $source @('apply', $normalizedPatch)
 Write-Host 'Building all four Android ABIs with interruptible, unlimited idle waits...'
 $workArgument = $work.Replace('\', '/')
 $sourceArgument = $source.Replace('\', '/')
