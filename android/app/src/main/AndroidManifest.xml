@@ -41,6 +41,10 @@
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-initiated TCP/UDP forwarding for one selected app (QQ or WeChat), with transparent diagnostic mode or narrowly scoped farm TLS inspection; persistent stop action." />
         </service>
+        <service android:name=".OverlayService" android:exported="false" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled floating companion window for viewing capture results and syncing them; persistent close action independent of the VPN." />
+        </service>
         <service android:name=".AccountMonitorService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-initiated continuous monitoring of selected accounts on a user-owned farm server; persistent stop action." />

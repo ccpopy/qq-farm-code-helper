@@ -18,6 +18,8 @@ public final class AppState {
     public static final ExecutorService IO = Executors.newFixedThreadPool(3);
     public static SettingsStore settings;
     public static volatile boolean capturing;
+    /** The companion window stands down while the user is already looking at the app. */
+    public static volatile boolean appVisible;
     public static volatile boolean captureReady;
     /** Receiving this round's replies; available results can still be submitted. */
     public static volatile boolean captureCollecting;

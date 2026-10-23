@@ -114,7 +114,11 @@ final class Ui {
     }
     /** 48dp touch target around a 24dp glyph. */
     ImageView iconButton(int drawable, int tintRes, String description, Runnable click) {
-        ImageView view = icon(drawable, tintRes, 48); view.setPadding(dp(12), dp(12), dp(12), dp(12));
+        return iconButton(drawable, tintRes, 48, description, click);
+    }
+    ImageView iconButton(int drawable, int tintRes, int sizeDp, String description, Runnable click) {
+        int inset = dp((sizeDp - 20) / 2f);
+        ImageView view = icon(drawable, tintRes, sizeDp); view.setPadding(inset, inset, inset, inset);
         view.setContentDescription(description); view.setFocusable(true);
         TypedValue value = new TypedValue();
         context.getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, value, true);
@@ -156,6 +160,25 @@ final class Ui {
             parent.addView(view, params);
         } else add(parent, view, 8);
         return view;
+    }
+    /** Give every child of a row the same width, so a button pair reads as one control. */
+    void equalize(LinearLayout row) {
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View child = row.getChildAt(i);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+            if (i > 0) params.setMarginStart(dp(8));
+            child.setLayoutParams(params);
+        }
+    }
+    /** A value over its label on a tinted tile; the same shape the app uses for capture results. */
+    LinearLayout statTile(LinearLayout parent, String value, String label) {
+        LinearLayout cell = column(); cell.setBackground(shape(R.color.farm_surface, 12));
+        cell.setPadding(dp(12), dp(8), dp(12), dp(8));
+        TextView top = strong(value, 15); top.setSingleLine(true); cell.addView(top);
+        cell.addView(text(label, 11, R.color.farm_muted));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+        if (parent.getChildCount() > 0) params.setMarginStart(dp(8));
+        parent.addView(cell, params); return cell;
     }
     MaterialButton button(LinearLayout parent, String label, Tone tone, int icon, Runnable action) {
         MaterialButton view = button(parent, label, tone, action); withIcon(view, icon); return view;

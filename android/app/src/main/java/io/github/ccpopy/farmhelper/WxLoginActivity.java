@@ -85,7 +85,8 @@ public final class WxLoginActivity extends AppCompatActivity {
         ui.add(content, links, 0);
         render();
     }
-    @Override protected void onResume() { super.onResume(); Ui.secure(getWindow()); }
+    @Override protected void onResume() { super.onResume(); AppState.appVisible = true; Ui.secure(getWindow()); }
+    @Override protected void onPause() { AppState.appVisible = false; AppState.changed(); super.onPause(); }
     @Override protected void onStart() { super.onStart(); model.listener = this::render; render(); }
     @Override protected void onStop() { model.listener = null; super.onStop(); }
     private void render() {

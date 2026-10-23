@@ -137,17 +137,18 @@ public final class MainActivity extends AppCompatActivity {
         handleIntent(getIntent());
     }
     @Override protected void onResume() {
-        super.onResume(); Ui.secure(getWindow()); AppState.listen(listener); syncMonitor(false); refresh();
+        super.onResume(); AppState.appVisible = true; Ui.secure(getWindow()); AppState.listen(listener); syncMonitor(false); refresh();
         if (requestingOverlay) {
             requestingOverlay = false;
             AppState.settings.overlayEnabled(Settings.canDrawOverlays(this));
             if (!Settings.canDrawOverlays(this)) message("未允许悬浮窗，可继续在应用内查看结果");
         }
         if (overlaySwitch != null) Ui.setQuietly(overlaySwitch, AppState.settings.overlayEnabled() && Settings.canDrawOverlays(this));
+        OverlayService.sync(this);
         AppState.changed();
         if (page == 2) loadAccounts();
     }
-    @Override protected void onPause() { AppState.unlisten(listener); super.onPause(); }
+    @Override protected void onPause() { AppState.appVisible = false; AppState.unlisten(listener); AppState.changed(); super.onPause(); }
     @Override protected void onDestroy() { if (breathing != null) breathing.cancel(); super.onDestroy(); }
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putInt("page", page); state.putBoolean("wechatVpn", wechatVpn); state.putLong("handledCapture", handledCapture);
@@ -159,6 +160,11 @@ public final class MainActivity extends AppCompatActivity {
     private void handleIntent(Intent intent) {
         if (intent.getBooleanExtra("showSettings", false)) navigation.setSelectedItemId(R.id.nav_settings);
         intent.removeExtra("showSettings");
+        if (intent.getBooleanExtra("startVpn", false)) {
+            intent.removeExtra("startVpn");
+            navigation.setSelectedItemId(R.id.nav_capture);
+            if (!AppState.capturing) root.post(this::toggleVpn);
+        }
         if (Intent.ACTION_SEND.equals(intent.getAction()) && "text/plain".equals(intent.getType())) {
             String text = intent.getStringExtra(Intent.EXTRA_TEXT);
             if (text != null && text.length() <= 16384) root.post(() -> manual(text));
@@ -737,7 +743,7 @@ public final class MainActivity extends AppCompatActivity {
 
         ui.section(content, "获取");
         LinearLayout capture = ui.card(content);
-        overlaySwitch = ui.switchRow(capture, "悬浮窗", "在 QQ 中查看结果、推送和换号继续获取",
+        overlaySwitch = ui.switchRow(capture, "悬浮窗", "在游戏里开关 VPN、查看结果并同步",
                 AppState.settings.overlayEnabled() && Settings.canDrawOverlays(this), this::setOverlayEnabled);
         boolean wechat = AppState.settings.capturePlatform() == CapturePlatform.WECHAT;
         ui.switchRow(capture, wechat ? "微信 VPN 只读好友" : "同时读取好友", wechat ? "开启后不保留 Code" : null,
@@ -792,7 +798,7 @@ public final class MainActivity extends AppCompatActivity {
     private interface Accept { void apply(String value) throws Exception; }
     private void setOverlayEnabled(boolean enabled) {
         if (!enabled || Settings.canDrawOverlays(this)) {
-            AppState.settings.overlayEnabled(enabled); AppState.changed(); return;
+            AppState.settings.overlayEnabled(enabled); OverlayService.sync(this); AppState.changed(); return;
         }
         if (overlaySwitch != null) Ui.setQuietly(overlaySwitch, false);
         requestingOverlay = true;

@@ -30,17 +30,13 @@ public final class CaptureVpnService extends VpnService {
     private ParcelFileDescriptor tunnel;
     private CapturePlatform platform;
     private boolean captureFriends;
-    private CaptureOverlay overlay;
     private long notifiedCapture;
     private int recoveryAttempt, recoveryToken;
     private boolean recoveryScheduled;
-    @Override public void onCreate() {
-        super.onCreate();
-        overlay = new CaptureOverlay(this);
-    }
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null || "STOP".equals(intent.getAction())) { stopCapture(); return START_NOT_STICKY; }
         if (active || stopping) return START_NOT_STICKY;
+        OverlayService.sync(this);
         platform = AppState.settings.capturePlatform();
         captureFriends = AppState.settings.friendCapture();
         AppState.capturePlatform = platform;
@@ -229,7 +225,6 @@ public final class CaptureVpnService extends VpnService {
         });
     }
     @Override public void onDestroy() {
-        if (overlay != null) { overlay.close(); overlay = null; }
         stopCapture();
         super.onDestroy();
     }

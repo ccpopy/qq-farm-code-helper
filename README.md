@@ -1,7 +1,7 @@
 # 农场 Code 获取助手
 
 本分支提供 **农场助手 Android**，支持 Android 10 及以上。请下载
-[Android 0.1.1 APK](https://github.com/ccpopy/qq-farm-code-helper/releases/tag/android-v0.1.1)，
+[Android 0.1.2 APK](https://github.com/ccpopy/qq-farm-code-helper/releases/tag/android-v0.1.2)，
 并阅读 [Android 使用与构建说明](android/README.md) 和 [更新日志](android/CHANGELOG.md)。
 Android 标签为 `android-vX.Y.Z`，与下述 Windows 桌面版本独立发布。
 

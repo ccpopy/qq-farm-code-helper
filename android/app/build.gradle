@@ -13,7 +13,7 @@ def farmKeyPassword = System.getenv('ANDROID_KEY_PASSWORD') ?: farmSigningProper
 def farmSigningSha256 = 'cf51c2ee1ed4870e98751894f41cb5406b7f2cd29645df2fa5186f829235c749'
 
 // CI passes the version from android-vX.Y.Z; local builds use the current release.
-def farmVersion = providers.gradleProperty('farmVersion').getOrElse('0.1.1')
+def farmVersion = providers.gradleProperty('farmVersion').getOrElse('0.1.2')
 if (!(farmVersion ==~ /(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)/)) {
     throw new GradleException('farmVersion must be a stable X.Y.Z version.')
 }
