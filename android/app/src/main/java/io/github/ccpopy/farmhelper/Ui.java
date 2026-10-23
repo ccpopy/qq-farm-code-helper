@@ -55,7 +55,7 @@ final class Ui {
     }
     /** Rounded surface whose rows are separated by hairlines. */
     LinearLayout card(LinearLayout parent) {
-        LinearLayout card = column(); card.setBackground(shape(R.color.farm_card, 20)); card.setClipToOutline(true);
+        LinearLayout card = column(); card.setBackground(shape(R.color.farm_card, 12)); card.setClipToOutline(true);
         add(parent, card, 4); return card;
     }
     LinearLayout padded(LinearLayout card) {
@@ -137,7 +137,7 @@ final class Ui {
         boolean compact = tone == Tone.TEXT || tone == Tone.DANGER;
         MaterialButton view = new MaterialButton(context);
         view.setText(label); view.setAllCaps(false); view.setTextSize(compact ? 14 : 15); view.setLetterSpacing(0);
-        view.setCornerRadius(dp(compact ? 20 : 16)); view.setMinHeight(dp(compact ? 40 : 52)); view.setMinimumHeight(dp(compact ? 40 : 52));
+        view.setCornerRadius(dp(compact ? 8 : 10)); view.setMinHeight(dp(compact ? 40 : 52)); view.setMinimumHeight(dp(compact ? 40 : 52));
         view.setInsetTop(0); view.setInsetBottom(0); view.setElevation(0); view.setStateListAnimator(null);
         if (compact) view.setPadding(dp(16), 0, dp(16), 0);
         int background = tone == Tone.PRIMARY ? R.color.farm_accent : tone == Tone.DANGER ? R.color.farm_danger_tint : R.color.farm_tint;
@@ -172,7 +172,7 @@ final class Ui {
     }
     /** A value over its label on a tinted tile; the same shape the app uses for capture results. */
     LinearLayout statTile(LinearLayout parent, String value, String label) {
-        LinearLayout cell = column(); cell.setBackground(shape(R.color.farm_surface, 12));
+        LinearLayout cell = column(); cell.setBackground(shape(R.color.farm_surface, 8));
         cell.setPadding(dp(12), dp(8), dp(12), dp(8));
         TextView top = strong(value, 15); top.setSingleLine(true); cell.addView(top);
         cell.addView(text(label, 11, R.color.farm_muted));
@@ -200,7 +200,7 @@ final class Ui {
     TextInputEditText input(LinearLayout parent, String label, String value, boolean secret) {
         TextInputLayout layout = new TextInputLayout(context); layout.setHint(label);
         layout.setBoxBackgroundMode(TextInputLayout.BOX_BACKGROUND_OUTLINE);
-        float r = dp(14); layout.setBoxCornerRadii(r, r, r, r);
+        float r = dp(8); layout.setBoxCornerRadii(r, r, r, r);
         layout.setBoxStrokeColor(color(R.color.farm_accent)); layout.setHintTextColor(ColorStateList.valueOf(color(R.color.farm_accent)));
         if (secret) layout.setEndIconMode(TextInputLayout.END_ICON_PASSWORD_TOGGLE);
         TextInputEditText edit = new TextInputEditText(layout.getContext()); edit.setTextSize(15); edit.setText(value); edit.setSaveEnabled(false);

@@ -21,5 +21,16 @@
         <item name="android:windowLightNavigationBar">@bool/light_system_bars</item>
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:windowSoftInputMode">adjustResize</item>
+        <!-- Dialogs and bottom sheets follow the app's tighter corner scale. -->
+        <item name="shapeAppearanceCornerExtraLarge">@style/Farm.Corner.ExtraLarge</item>
+        <item name="shapeAppearanceCornerLarge">@style/Farm.Corner.Large</item>
+    </style>
+    <style name="Farm.Corner.ExtraLarge" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">16dp</item>
+    </style>
+    <style name="Farm.Corner.Large" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">12dp</item>
     </style>
 </resources>

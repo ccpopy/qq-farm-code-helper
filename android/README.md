@@ -1,8 +1,8 @@
 # 农场助手 Android
 
 原生 Java / Material Components Android 应用，不依赖 Android Studio。
-当前正式版本为 `0.1.2`（`versionCode 1002`），支持 Android 10 及以上。
-[下载 Android 正式版](https://github.com/ccpopy/qq-farm-code-helper/releases/tag/android-v0.1.2)，
+当前正式版本为 `0.1.3`（`versionCode 1003`），支持 Android 10 及以上。
+[下载 Android 正式版](https://github.com/ccpopy/qq-farm-code-helper/releases/tag/android-v0.1.3)，
 使用说明及限制见下文和 [Android 更新日志](CHANGELOG.md)。
 
 ## 构建与覆盖安装
@@ -15,7 +15,7 @@
 ```powershell
 .\scripts\build-android.ps1 -JdkDirectory $env:JAVA_HOME -SdkDirectory $env:ANDROID_HOME
 .\scripts\build-android.ps1 -Install -DeviceSerial <已授权设备序列号> -AdbPath <adb路径>
-.\scripts\build-android.ps1 -Configuration Release -Version 0.1.2 -Bundle
+.\scripts\build-android.ps1 -Configuration Release -Version 0.1.3 -Bundle
 ```
 
 脚本验证固定的 hev-socks5-tunnel 2.19.1 AAR 的 SHA-256，并从固定提交和子模块构建
@@ -54,10 +54,15 @@ Gradle 校验私钥存在、证书指纹和包名，构建脚本再次检查 APK
   绑定按服务器、账号 UUID、平台及 QQ 号隔离；只有 Code 没有身份时仍需选择或确认目标账号。无需修改 main 后台。
 - 账号页自动读取服务器账号并逐个检查在线状态。“掉线提醒”开关与账号选择相互独立：铃铛或“全选”选择账号，
   开关开启且至少选中一个账号时才运行提醒服务；未选择账号等同于不提醒。通知栏“停止”会同时关闭开关。
-- 设置页“悬浮窗”开启后（需系统悬浮窗权限），在游戏里以小悬浮球常驻：点开是一张紧凑的半透明卡片，
-  可直接开始/停止 VPN、查看 Code 与好友数量、同步或清除结果；在助手自身界面前台时自动隐藏。
+- 设置页“悬浮窗”开启后（需系统悬浮窗权限），在游戏里以小悬浮球常驻并自动吸附屏幕边缘：点开是紧凑的半透明卡片，
+  可开始/停止 VPN、查看 Code 与好友数量、同步或清除结果。卡片只有“收起”，点卡片外也会收起；
+  要关闭悬浮窗，拖动悬浮球到屏幕底部出现的关闭区域（也可在设置或通知中关闭）。在助手前台时自动隐藏。
   窗口由独立前台服务 `OverlayService` 托管，停止 VPN 后仍可用来重新开始获取。
-  通知中的“停止”只关闭悬浮窗；关闭悬浮权限后服务也会停止。
+- 支持多个服务器：设置页“服务器”是列表，可添加、编辑（名称、地址、Token、HTTP）和删除，每个服务器的 Token、
+  账号选择与掉线提醒相互独立；原有单服务器配置作为第一个服务器原样保留（未加前缀的键，`serverOrder` 记录顺序）。
+  推送时并行读取全部服务器：自身 GID 只在一个服务器上命中时直接提示更新，否则按服务器分组选择账号或新增到某个服务器。
+  账号页、悬浮窗、微信扫码“登录到”、掉线提醒与通知都按服务器区分；某个服务器无法连接不影响其他服务器。
+  账号列表逐台显示完成结果，并可仅重试失败服务器；删除服务器或修改地址／Token 后，旧账号快照与微信登录选择失效，需重新选择。
 - 设置页“允许截图”默认关闭（`FLAG_SECURE`，截屏与录屏为黑色）；开启后应用画面可正常截屏。
 
 1. 在设置页填写自己的 Node 部署服务器 URL 和管理 API Token，“保存并测试”。

@@ -76,13 +76,19 @@ public final class MainActivity extends AppCompatActivity {
     // Accounts page
     private LinearLayout accountList;
     private MaterialSwitch monitorSwitch;
-    private TextView monitorStatus, accountTitle;
-    private MaterialButton selectAll;
-    private static List<ApiClient.Account> accountCache = new ArrayList<>();
+    private TextView monitorStatus;
+    /** Last read of each server, keyed by server id; kept across page switches for instant display. */
+    private static final Map<String, ServerDirectory.Group> accountGroups = new java.util.LinkedHashMap<>();
+    /** Online state per server generation and account. */
     private static final Map<String, Boolean> onlineCache = new HashMap<>();
-    private static String accountCacheConnection = "";
-    private static int accountLoad;
+    /** "" when the last contact with a server succeeded, otherwise a short reason. */
+    private static final Map<String, String> serverStatus = new HashMap<>();
+    private static volatile int accountLoad;
+    private static int accountRequest;
+    private static final Map<String, Integer> serverLoads = new HashMap<>();
     private boolean accountsLoading;
+    private final Map<String, View> serverDots = new HashMap<>();
+    private final Map<String, TextView> serverLines = new HashMap<>();
     // Logs page
     private TextView logs, connections;
 
@@ -170,20 +176,25 @@ public final class MainActivity extends AppCompatActivity {
             if (text != null && text.length() <= 16384) root.post(() -> manual(text));
             intent.removeExtra(Intent.EXTRA_TEXT); intent.setAction(Intent.ACTION_MAIN);
         }
-        String id = intent.getStringExtra("accountId"), server = intent.getStringExtra("server");
+        String id = intent.getStringExtra("accountId"), address = intent.getStringExtra("server");
         String connection = intent.getStringExtra("connectionId");
         String accountUuid = intent.getStringExtra("accountUuid");
-        intent.removeExtra("accountUuid");
+        String profile = intent.getStringExtra("profile");
+        intent.removeExtra("accountUuid"); intent.removeExtra("profile");
         intent.removeExtra("accountId"); intent.removeExtra("server"); intent.removeExtra("connectionId");
         if (id == null || id.isEmpty()) return;
-        if (!AppState.settings.server().equals(server) || connection == null || connection.isEmpty() || !connection.equals(AppState.settings.connectionId())) {
+        // Notifications from before multi-server support belong to the first server.
+        SettingsStore server = AppState.settings.server(profile == null ? "0" : profile);
+        if (server == null || !server.server().equals(address) || connection == null || connection.isEmpty() || !connection.equals(server.connectionId())) {
             message("服务器配置已变化，这条通知已失效"); return;
         }
         async("正在打开账号", () -> {
-            for (ApiClient.Account account : new ApiClient(AppState.settings).accounts()) if (account.id.equals(id)) {
+            ApiClient client = new ApiClient(server);
+            if (!connection.equals(client.connectionId)) throw new IllegalStateException("服务器配置已变化，这条通知已失效");
+            for (ApiClient.Account account : client.accounts()) if (account.id.equals(id)) {
                 if (accountUuid != null && !accountUuid.isEmpty() && !accountUuid.equals(account.uuid))
                     throw new IllegalStateException("原账号已被删除或替换，通知已失效");
-                runOnUiThread(() -> relogin(account));
+                runOnUiThread(() -> relogin(client, account));
                 return;
             }
             throw new IllegalStateException("通知对应的账号已不存在");
@@ -192,7 +203,7 @@ public final class MainActivity extends AppCompatActivity {
     private void showPage() {
         if (breathing != null) { breathing.cancel(); breathing = null; }
         core = null; halo = null; coreIcon = null; ringLabel = ringStatus = null; appButton = null; segment = resultSlot = null; resultKey = null;
-        accountList = null; monitorSwitch = overlaySwitch = null; monitorStatus = accountTitle = null; selectAll = null; logs = connections = null;
+        accountList = null; monitorSwitch = overlaySwitch = null; monitorStatus = null; serverDots.clear(); serverLines.clear(); logs = connections = null;
         content.removeAllViews();
         switch (page) { case 1: capturePage(); break; case 2: accountsPage(); break; case 3: logsPage(); break; default: settingsPage(); }
         scroll.scrollTo(0, 0); refresh();
@@ -212,8 +223,8 @@ public final class MainActivity extends AppCompatActivity {
         header("农场助手");
         segment = segmented(new String[]{"QQ", "微信"}, platform.ordinal(), which -> choosePlatform(CapturePlatform.values()[which]));
         ui.add(content, segment, 10);
-        if (AppState.settings.server().isEmpty() || !AppState.settings.hasToken())
-            banner("还没有连接服务器", "去设置", this::configureServer);
+        if (!AppState.settings.hasServer())
+            banner("还没有添加服务器", "去添加", this::configureServer);
         else if (!scan && !AppState.settings.passthrough() && !new CertificateManager(this).exists())
             banner("首次使用需要安装证书", "安装", this::certificateSheet);
 
@@ -222,7 +233,7 @@ public final class MainActivity extends AppCompatActivity {
         android.graphics.drawable.GradientDrawable wash = new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
                 new int[]{getColor(R.color.farm_hero), getColor(R.color.farm_card)});
-        wash.setCornerRadius(ui.dp(28)); hero.setBackground(wash);
+        wash.setCornerRadius(ui.dp(16)); hero.setBackground(wash);
         hero.setPadding(ui.dp(20), ui.dp(16), ui.dp(20), ui.dp(24));
         if (platform == CapturePlatform.WECHAT) {
             LinearLayout mode = segmented(new String[]{"扫码登录", "VPN 获取"}, wechatVpn ? 1 : 0, which -> {
@@ -230,7 +241,7 @@ public final class MainActivity extends AppCompatActivity {
                 if (wechatVpn != (which == 1)) { wechatVpn = which == 1; showPage(); }
             });
             ((LinearLayout.LayoutParams) mode.getLayoutParams()).width = ui.dp(220);
-            mode.setBackground(ui.shape(R.color.farm_card, 14));
+            mode.setBackground(ui.shape(R.color.farm_card, 10));
             hero.addView(mode);
         }
         FrameLayout stage = new FrameLayout(this);
@@ -263,14 +274,14 @@ public final class MainActivity extends AppCompatActivity {
     private interface Choice { void pick(int which); }
     /** Pill segmented control; the selected option sits on a raised card. */
     private LinearLayout segmented(String[] labels, int selected, Choice choice) {
-        LinearLayout group = ui.row(); group.setBackground(ui.shape(R.color.farm_line, 16));
+        LinearLayout group = ui.row(); group.setBackground(ui.shape(R.color.farm_line, 10));
         group.setPadding(ui.dp(4), ui.dp(4), ui.dp(4), ui.dp(4));
         for (int i = 0; i < labels.length; i++) {
             int which = i; boolean on = i == selected;
             TextView tab = ui.text(labels[i], 15, on ? R.color.farm_ink : R.color.farm_muted); tab.setGravity(Gravity.CENTER);
             tab.setMinHeight(ui.dp(40)); tab.setSelected(on);
             tab.setTypeface(on ? Ui.MEDIUM : Typeface.DEFAULT);
-            if (on) { tab.setBackground(ui.shape(R.color.farm_card, 12)); tab.setElevation(ui.dp(1)); }
+            if (on) { tab.setBackground(ui.shape(R.color.farm_card, 7)); tab.setElevation(ui.dp(1)); }
             ui.ripple(tab); tab.setOnClickListener(v -> choice.pick(which));
             group.addView(tab, new LinearLayout.LayoutParams(0, -2, 1));
         }
@@ -278,7 +289,7 @@ public final class MainActivity extends AppCompatActivity {
         group.setLayoutParams(params); return group;
     }
     private void banner(String title, String action, Runnable click) {
-        LinearLayout box = ui.row(); box.setBackground(ui.shape(R.color.farm_amber_tint, 16));
+        LinearLayout box = ui.row(); box.setBackground(ui.shape(R.color.farm_amber_tint, 10));
         box.setPadding(ui.dp(16), ui.dp(8), ui.dp(8), ui.dp(8));
         TextView label = ui.text(title, 14, R.color.farm_amber); label.setTypeface(Ui.MEDIUM);
         box.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
@@ -319,7 +330,7 @@ public final class MainActivity extends AppCompatActivity {
         LinearLayout title = ui.row();
         title.addView(ui.strong("本次结果", 16), new LinearLayout.LayoutParams(0, -2, 1));
         TextView chip = ui.text(result.platform().label, 12, R.color.farm_accent); chip.setTypeface(Ui.MEDIUM);
-        chip.setBackground(ui.shape(R.color.farm_tint, 10)); chip.setPadding(ui.dp(10), ui.dp(3), ui.dp(10), ui.dp(3));
+        chip.setBackground(ui.shape(R.color.farm_tint, 6)); chip.setPadding(ui.dp(10), ui.dp(3), ui.dp(10), ui.dp(3));
         title.addView(chip);
         ui.add(body, title, 12);
         LinearLayout facts = ui.row();
@@ -339,7 +350,7 @@ public final class MainActivity extends AppCompatActivity {
         ui.add(body, actions, 0);
     }
     private void fact(LinearLayout parent, String value, String label) {
-        LinearLayout cell = ui.column(); cell.setBackground(ui.shape(R.color.farm_surface, 14));
+        LinearLayout cell = ui.column(); cell.setBackground(ui.shape(R.color.farm_surface, 8));
         cell.setPadding(ui.dp(12), ui.dp(10), ui.dp(12), ui.dp(10));
         cell.addView(ui.strong(value, 17)); cell.addView(ui.text(label, 12, R.color.farm_muted));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
@@ -407,27 +418,21 @@ public final class MainActivity extends AppCompatActivity {
             if (!automatic) message(capture.code().isEmpty() && capture.gids().isEmpty() ? "没有可推送的数据" : "推送内容已在设置中关闭");
             return;
         }
-        if (AppState.settings.server().isEmpty() || !AppState.settings.hasToken()) {
-            if (automatic) message("连接服务器后即可推送"); else requireServer();
+        if (!AppState.settings.hasServer()) {
+            if (automatic) message("添加服务器后即可推送"); else requireServer();
             return;
         }
         async("正在比对服务器账号", () -> {
-            ApiClient client = new ApiClient(AppState.settings);
-            List<ApiClient.Account> accounts = client.accounts();
-            accounts.removeIf(account -> !account.platform.equals(capture.platform().id));
-            String own = capture.ownGid(), previousId = AppState.settings.targetId();
-            ApiClient.Account byGid = client.matchingAccount(accounts, capture), previous = null;
-            for (ApiClient.Account account : accounts) {
-                String known = client.knownGid(account);
-                if (account.id.equals(previousId) && (own.isEmpty() || known.isEmpty() || own.equals(known))) previous = account;
-            }
-            ApiClient.Account detected = byGid, last = previous;
+            List<ServerDirectory.Group> groups = ServerDirectory.load(capture.platform());
+            if (groups.stream().noneMatch(ServerDirectory.Group::ok))
+                throw new IllegalStateException(groups.size() == 1 ? groups.get(0).error() : "所有服务器都无法连接");
+            ServerDirectory.Choice detected = ServerDirectory.detect(groups, capture), last = ServerDirectory.previous(groups, capture);
             runOnUiThread(() -> {
                 AppState.Capture current = AppState.capture();
-                if (isFinishing() || isDestroyed() || !client.isCurrent() || current == null || current.generation() != capture.generation()) return;
-                if (detected != null) confirmPush(detected, true, accounts, capture, code, friends);
-                else if (last != null) confirmPush(last, false, accounts, capture, code, friends);
-                else chooseDestination(accounts, capture, code, friends);
+                if (isFinishing() || isDestroyed() || !ServerDirectory.allCurrent(groups) || current == null || current.generation() != capture.generation()) return;
+                if (detected != null) confirmPush(detected, true, groups, capture, code, friends);
+                else if (last != null) confirmPush(last, false, groups, capture, code, friends);
+                else chooseDestination(groups, capture, code, friends);
             });
         });
     }
@@ -435,48 +440,53 @@ public final class MainActivity extends AppCompatActivity {
         int count = capture == null ? 0 : capture.gids().size();
         return code && friends ? "将推送 Code 和 " + count + " 位好友。" : code ? "将推送 Code。" : "将追加 " + count + " 位好友。";
     }
-    private void confirmPush(ApiClient.Account account, boolean detected, List<ApiClient.Account> accounts, AppState.Capture capture, boolean code, boolean friends) {
+    private String where(ServerDirectory.Group group) {
+        return AppState.settings.readyServers().size() > 1 ? "\n服务器：" + group.server().label() : "";
+    }
+    private void confirmPush(ServerDirectory.Choice choice, boolean detected, List<ServerDirectory.Group> groups, AppState.Capture capture, boolean code, boolean friends) {
+        ApiClient.Account account = choice.account();
         new MaterialAlertDialogBuilder(this).setTitle(detected ? "检测到已有账号" : "推送到上次的账号？")
-                .setMessage(account.name + "\n" + account.identityLabel() + "\n\n" + pushSummary(capture, code, friends))
-                .setPositiveButton(detected ? "更新" : "推送", (d, w) -> push(account, capture, code, friends))
-                .setNeutralButton("选择其他", (d, w) -> chooseDestination(accounts, capture, code, friends))
+                .setMessage(account.name + "\n" + account.identityLabel() + where(choice.group()) + "\n\n" + pushSummary(capture, code, friends))
+                .setPositiveButton(detected ? "更新" : "推送", (d, w) -> push(choice.group(), account, capture, code, friends))
+                .setNeutralButton("选择其他", (d, w) -> chooseDestination(groups, capture, code, friends))
                 .setNegativeButton("取消", null).show();
     }
-    private void chooseDestination(List<ApiClient.Account> accounts, AppState.Capture capture, boolean code, boolean friends) {
-        if (!code && accounts.isEmpty()) { message("服务器上没有同平台账号；只有好友数据时无法新增"); return; }
-        List<String> labels = new ArrayList<>();
-        if (code) labels.add("＋ 新增账号");
-        for (ApiClient.Account account : accounts) labels.add(account.selectionLabel());
-        new MaterialAlertDialogBuilder(this).setTitle(code ? "选择账号" : "追加好友到")
-                .setItems(labels.toArray(new String[0]), (d, which) -> {
-                    if (code && which == 0) { createAccount(capture, friends); return; }
-                    ApiClient.Account account = accounts.get(which - (code ? 1 : 0));
-                    if (!code) { push(account, capture, false, friends); return; }
-                    new MaterialAlertDialogBuilder(this).setTitle("覆盖「" + account.name + "」？")
-                            .setMessage(account.identityLabel() + "\n这个账号的登录将被替换为本次获取的 Code。\n" + pushSummary(capture, code, friends))
-                            .setPositiveButton("覆盖", (x, y) -> push(account, capture, code, friends))
-                            .setNegativeButton("取消", null).show();
-                }).setNegativeButton("取消", null).show();
+    private void chooseDestination(List<ServerDirectory.Group> groups, AppState.Capture capture, boolean code, boolean friends) {
+        if (!code && ServerDirectory.accountCount(groups) == 0) { message("服务器上没有同平台账号；只有好友数据时无法新增"); return; }
+        AccountPicker.show(this, code ? "推送到哪个账号？" : "追加好友到", groups, (group, account) -> {
+            if (!code) { push(group, account, capture, false, friends); return; }
+            new MaterialAlertDialogBuilder(this).setTitle("覆盖「" + account.name + "」？")
+                    .setMessage(account.identityLabel() + where(group) + "\n这个账号的登录将被替换为本次获取的 Code。\n" + pushSummary(capture, code, friends))
+                    .setPositiveButton("覆盖", (x, y) -> push(group, account, capture, code, friends))
+                    .setNegativeButton("取消", null).show();
+        }, groups.size() > 1 ? "新增到这个服务器" : "新增账号", code ? group -> createAccount(group, capture, friends) : null);
     }
-    private void push(ApiClient.Account account, AppState.Capture capture, boolean code, boolean friends) {
+    private void push(ServerDirectory.Group group, ApiClient.Account account, AppState.Capture capture, boolean code, boolean friends) {
         if (capture == null) { message("结果已过期，请重新获取"); return; }
+        if (!group.ok() || !group.current()) { message("服务器配置已变化，请重新选择"); return; }
         long generation = capture.generation();
+        SettingsStore server = group.server();
+        ApiClient client = group.client();
         async("正在推送", () -> {
             AppState.Capture current = AppState.capture();
             if (current == null || current.generation() != generation) throw new IllegalStateException("结果已过期，请重新获取");
-            new ApiClient(AppState.settings).push(account.id, capture, code, friends);
-            AppState.settings.target(account);
-            runOnUiThread(() -> message("已推送到 " + account.name));
-            if (code) watchOnline(account);
+            client.push(account.id, capture, code, friends);
+            if (client.isCurrent()) server.target(account);
+            runOnUiThread(() -> message("已推送到 " + AccountPicker.describe(group, account)));
+            if (code) watchOnline(client, account);
         });
     }
-    private void createAccount(AppState.Capture capture, boolean friends) {
+    private void createAccount(ServerDirectory.Group group, AppState.Capture capture, boolean friends) {
         if (capture == null || capture.code().isEmpty()) { message("新增账号需要 Code"); return; }
+        if (!group.ok() || !group.current()) { message("服务器配置已变化，请重新选择"); return; }
+        SettingsStore server = group.server();
+        ApiClient client = group.client();
         String nonce = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         LinearLayout form = ui.column(); form.setPadding(ui.dp(24), ui.dp(8), ui.dp(24), 0);
         TextInputEditText name = ui.input(form, "账号备注", "", false);
         Ui.field(name).setHelperText("会自动附加随机后缀，避免与同名账号混淆");
-        var dialog = new MaterialAlertDialogBuilder(this).setTitle("新增" + capture.platform().label + "账号")
+        boolean many = AppState.settings.readyServers().size() > 1;
+        var dialog = new MaterialAlertDialogBuilder(this).setTitle("新增" + capture.platform().label + "账号" + (many ? " · " + server.label() : ""))
                 .setView(form).setNegativeButton("取消", null).setPositiveButton("新增", null).create();
         Ui.secure(dialog.getWindow());
         dialog.setOnShowListener(ignored -> dialog.getButton(-1).setOnClickListener(view -> {
@@ -484,31 +494,35 @@ public final class MainActivity extends AppCompatActivity {
             try { baseName = AccountNamePolicy.base(Ui.value(name)); actualName = AccountNamePolicy.unique(baseName, nonce); Ui.field(name).setError(null); }
             catch (IllegalArgumentException error) { Ui.field(name).setError(error.getMessage()); return; }
             dialog.dismiss();
-            String connection = AppState.settings.connectionId();
             async("正在新增账号", () -> {
-                if (!connection.equals(AppState.settings.connectionId()) || !AppState.isCurrentCapture(capture))
+                if (!client.isCurrent() || !AppState.isCurrentCapture(capture))
                     throw new IllegalStateException("服务器或本次结果已变化，请重新推送");
-                ApiClient.Account created = new ApiClient(AppState.settings).create(baseName, actualName, capture, friends);
-                runOnUiThread(() -> message("已新增账号 " + created.name));
-                watchOnline(created);
+                ApiClient.Account created = client.create(baseName, actualName, capture, friends);
+                runOnUiThread(() -> message("已新增账号 " + AccountPicker.describe(group, created)));
+                watchOnline(client, created);
             });
         })); dialog.show();
     }
     /** The server accepting a Code is not the same as the account being online; report the latter separately. */
-    private void watchOnline(ApiClient.Account account) {
+    private void watchOnline(ApiClient client, ApiClient.Account account) {
+        String key = client.profile().id() + "/" + client.connectionId + "/" + account.id;
         AppState.IO.execute(() -> {
             try {
                 for (int attempt = 0; attempt < 4; attempt++) {
                     Thread.sleep(4000);
-                    ApiClient client = new ApiClient(AppState.settings);
-                    for (ApiClient.Account current : client.accounts()) if (current.id.equals(account.id) && client.connected(current)) {
-                        onlineCache.put(account.id, true); AppState.log("服务器", "推送的账号已上线");
-                        runOnUiThread(() -> { message(account.name + " 已上线"); if (page == 2) renderAccounts(); });
+                    if (!client.isCurrent()) return;
+                    for (ApiClient.Account current : client.accounts()) if (current.id.equals(account.id)
+                            && current.uuid.equals(account.uuid) && client.connected(current)) {
+                        runOnUiThread(() -> {
+                            if (!client.isCurrent() || isDestroyed()) return;
+                            onlineCache.put(key, true); AppState.log("服务器", "推送的账号已上线");
+                            message(account.name + " 已上线"); if (page == 2) renderAccounts();
+                        });
                         return;
                     }
                 }
                 AppState.log("服务器", "推送已完成，账号尚未上线");
-                runOnUiThread(() -> message(account.name + " 尚未上线，可在账号页查看"));
+                runOnUiThread(() -> { if (client.isCurrent() && !isDestroyed()) message(account.name + " 尚未上线，可在账号页查看"); });
             } catch (Exception ignored) { /* Online state stays visible on the accounts page. */ }
         });
     }
@@ -544,14 +558,7 @@ public final class MainActivity extends AppCompatActivity {
         monitorSwitch = new MaterialSwitch(this); monitorSwitch.setContentDescription("掉线提醒");
         monitorStatus = ui.listRow(alerts, ui.icon(R.drawable.ic_bell, R.color.farm_accent, 22), "掉线提醒", "", monitorSwitch, () -> monitorSwitch.toggle());
         monitorSwitch.setOnCheckedChangeListener((button, on) -> { if (button.getTag() == null) setMonitoring(on); });
-        LinearLayout heading = ui.row(); heading.setPadding(ui.dp(6), ui.dp(16), 0, ui.dp(8));
-        accountTitle = ui.text("服务器账号", 13, R.color.farm_muted); accountTitle.setTypeface(Ui.MEDIUM);
-        heading.addView(accountTitle, new LinearLayout.LayoutParams(0, -2, 1));
-        selectAll = ui.button(heading, "全选", Ui.Tone.TEXT, this::toggleAllWatched);
-        ui.withIcon(selectAll, R.drawable.ic_select_all); selectAll.setMinHeight(ui.dp(36)); selectAll.setMinimumHeight(ui.dp(36));
-        ui.add(content, heading, 0);
         accountList = ui.column(); ui.add(content, accountList, 0);
-        if (!accountCacheConnection.equals(AppState.settings.connectionId())) { accountCache = new ArrayList<>(); onlineCache.clear(); }
         renderAccounts(); loadAccounts();
     }
     private void setMonitoring(boolean on) {
@@ -560,102 +567,166 @@ public final class MainActivity extends AppCompatActivity {
         syncMonitor(on); refresh();
     }
     /**
-     * Run the alert service exactly when the switch is on and at least one account is selected.
-     * An enabled switch with nothing selected simply alerts nobody.
+     * Run the alert service exactly when the switch is on and at least one account is selected on
+     * any server. An enabled switch with nothing selected simply alerts nobody.
      */
     private void syncMonitor(boolean askPermission) {
-        boolean want = AppState.settings.monitorEnabled() && !AppState.settings.monitoredIds().isEmpty()
-                && !AppState.settings.server().isEmpty() && AppState.settings.hasToken();
+        boolean want = AppState.settings.monitorEnabled() && AppState.settings.anyMonitored();
         if (!want) { if (AppState.monitoring) stopService(new Intent(this, AccountMonitorService.class)); return; }
-        if (AppState.monitoring) return;
-        Runnable start = () -> startForegroundService(new Intent(this, AccountMonitorService.class).setAction("START"));
-        if (notificationsAllowed()) start.run(); else if (askPermission) notificationPermission(start);
+        Intent start = new Intent(this, AccountMonitorService.class).setAction("START");
+        // A running service only needs to pick up the new selection.
+        if (AppState.monitoring) { startService(start); return; }
+        if (notificationsAllowed()) startForegroundService(start);
+        else if (askPermission) notificationPermission(() -> startForegroundService(start));
     }
     private boolean notificationsAllowed() {
         return (Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
                 && NotificationManagerCompat.from(this).areNotificationsEnabled();
     }
-    private void toggleAllWatched() {
-        Set<String> watched = AppState.settings.monitoredIds();
-        boolean all = !accountCache.isEmpty() && accountCache.stream().allMatch(a -> watched.contains(a.id));
-        for (ApiClient.Account account : accountCache) { if (all) watched.remove(account.id); else watched.add(account.id); }
-        AppState.settings.monitor(watched); syncMonitor(false);
-        renderAccounts(); refresh();
+    private static String onlineKey(SettingsStore server, ApiClient.Account account) {
+        return server.id() + "/" + server.connectionId() + "/" + account.id;
     }
     private void loadAccounts() {
-        if (AppState.settings.server().isEmpty() || !AppState.settings.hasToken()) { renderAccounts(); return; }
-        int run = ++accountLoad; accountsLoading = true; renderAccounts();
+        int run = ++accountLoad;
+        if (!AppState.settings.hasServer()) { accountsLoading = false; accountGroups.clear(); renderAccounts(); return; }
+        Map<String, Integer> requests = new HashMap<>();
+        for (SettingsStore server : AppState.settings.readyServers()) {
+            int request = ++accountRequest;
+            serverLoads.put(server.id(), request); requests.put(server.id(), request);
+        }
+        accountsLoading = true; renderAccounts();
         AppState.IO.execute(() -> {
-            try {
-                ApiClient client = new ApiClient(AppState.settings);
-                List<ApiClient.Account> list = client.accounts();
+            ServerDirectory.load(null, group -> {
+                Integer request = requests.get(group.server().id());
+                if (request != null) runOnUiThread(() -> acceptAccountGroup(run, request, group));
+            });
+            runOnUiThread(() -> {
+                if (run != accountLoad || isDestroyed()) return;
+                accountsLoading = false; renderAccounts();
+            });
+        });
+    }
+    private void retryAccounts(SettingsStore server) {
+        int run = accountLoad, request = ++accountRequest;
+        serverLoads.put(server.id(), request);
+        AppState.IO.execute(() -> {
+            ServerDirectory.Group group = ServerDirectory.read(server, null);
+            runOnUiThread(() -> acceptAccountGroup(run, request, group));
+        });
+    }
+    /** Publish each finished server immediately; late replies cannot replace a newer request. */
+    private void acceptAccountGroup(int run, int request, ServerDirectory.Group group) {
+        if (isDestroyed() || run != accountLoad || !Integer.valueOf(request).equals(serverLoads.get(group.server().id()))
+                || !group.current()) return;
+        accountGroups.put(group.server().id(), group);
+        serverStatus.put(serverKey(group.server()), group.ok() ? "" : group.error());
+        renderAccounts();
+        if (!group.ok()) return;
+        AppState.IO.execute(() -> {
+            for (ApiClient.Account account : group.accounts()) {
+                if (run != accountLoad || !group.current()) return;
+                boolean online;
+                try { online = group.client().connected(account); } catch (Exception unknown) { continue; }
+                boolean state = online;
                 runOnUiThread(() -> {
-                    if (run != accountLoad || !client.isCurrent()) return;
-                    accountCache = list; accountCacheConnection = client.connectionId; accountsLoading = false;
-                    onlineCache.keySet().retainAll(list.stream().map(a -> a.id).collect(java.util.stream.Collectors.toSet()));
-                    renderAccounts();
+                    if (isDestroyed() || run != accountLoad || !group.current()
+                            || !Integer.valueOf(request).equals(serverLoads.get(group.server().id()))) return;
+                    onlineCache.put(onlineKey(group.server(), account), state); renderAccounts();
                 });
-                for (ApiClient.Account account : list) {
-                    if (run != accountLoad) return;
-                    boolean online;
-                    try { online = client.connected(account); } catch (Exception unknown) { continue; }
-                    boolean state = online;
-                    runOnUiThread(() -> { if (run != accountLoad) return; onlineCache.put(account.id, state); renderAccounts(); });
-                }
-            } catch (Exception error) {
-                String detail = error instanceof ApiClient.AuthException ? "Token 无效，请到设置更新" : "无法连接服务器";
-                runOnUiThread(() -> { if (run != accountLoad) return; accountsLoading = false; renderAccounts(); message(detail); });
             }
         });
     }
     private void renderAccounts() {
         if (accountList == null) return;
         accountList.removeAllViews();
-        boolean configured = !AppState.settings.server().isEmpty() && AppState.settings.hasToken();
-        selectAll.setVisibility(configured && !accountCache.isEmpty() ? View.VISIBLE : View.GONE);
-        accountTitle.setText(accountCache.isEmpty() ? "服务器账号" : "服务器账号 · " + accountCache.size());
-        if (!configured) {
+        List<SettingsStore> servers = AppState.settings.readyServers();
+        if (servers.isEmpty()) {
+            ui.section(accountList, "服务器账号");
             LinearLayout body = ui.padded(ui.card(accountList));
-            ui.add(body, ui.text("连接服务器后，这里会显示账号和在线状态。", 14, R.color.farm_muted), 12);
-            ui.button(body, "去设置", Ui.Tone.TONAL, this::configureServer); return;
+            ui.add(body, ui.text("添加服务器后，这里会显示账号和在线状态。", 14, R.color.farm_muted), 12);
+            ui.button(body, "添加服务器", Ui.Tone.TONAL, () -> serverSheet(null)); return;
         }
-        if (accountCache.isEmpty()) {
-            LinearLayout body = ui.padded(ui.card(accountList));
-            ui.add(body, ui.text(accountsLoading ? "正在读取…" : "服务器上还没有账号。获取 Code 后推送即可新增。", 14, R.color.farm_muted), 4);
-            return;
-        }
-        Set<String> watched = AppState.settings.monitoredIds();
-        boolean all = accountCache.stream().allMatch(a -> watched.contains(a.id));
-        selectAll.setText(all ? "全不选" : "全选");
-        LinearLayout card = ui.card(accountList);
-        for (ApiClient.Account account : accountCache) {
-            Boolean online = onlineCache.get(account.id);
-            boolean bell = watched.contains(account.id);
-            ImageView toggle = ui.iconButton(bell ? R.drawable.ic_bell : R.drawable.ic_bell_off, bell ? R.color.farm_accent : R.color.farm_line_strong,
-                    bell ? "关闭 " + account.name + " 的掉线提醒" : "开启 " + account.name + " 的掉线提醒", () -> toggleWatch(account));
-            if (bell) toggle.setBackground(ui.oval(R.color.farm_tint));
-            String state = online == null ? (account.running ? "检查中" : "已停止") : online ? "在线" : "离线";
-            int tone = online == null ? R.color.farm_line_strong : online ? R.color.farm_accent : R.color.farm_danger;
-            ui.listRow(card, ui.dot(tone), account.name, account.identityLabel() + " · " + state, toggle, () -> relogin(account));
+        boolean grouped = servers.size() > 1;
+        for (SettingsStore server : servers) {
+            ServerDirectory.Group group = accountGroups.get(server.id());
+            if (group != null && !group.current()) group = null;
+            ServerDirectory.Group shown = group;
+            Set<String> watched = server.monitoredIds();
+            LinearLayout heading = ui.row(); heading.setPadding(ui.dp(6), ui.dp(16), 0, ui.dp(8));
+            String count = shown != null && shown.ok() ? " · " + shown.accounts().size() : "";
+            TextView title = ui.text((grouped ? server.label() : "服务器账号") + count, 13, grouped ? R.color.farm_accent : R.color.farm_muted);
+            title.setTypeface(Ui.MEDIUM);
+            heading.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+            if (shown != null && shown.ok() && !shown.accounts().isEmpty()) {
+                boolean all = shown.accounts().stream().allMatch(a -> watched.contains(a.id));
+                MaterialButton select = ui.button(heading, all ? "全不选" : "全选", Ui.Tone.TEXT, () -> toggleAllWatched(server, shown));
+                ui.withIcon(select, R.drawable.ic_select_all); select.setMinHeight(ui.dp(34)); select.setMinimumHeight(ui.dp(34));
+            }
+            ui.add(accountList, heading, 0);
+            if (shown == null) {
+                LinearLayout body = ui.padded(ui.card(accountList));
+                ui.add(body, ui.text(accountsLoading ? "正在读取…" : "尚未读取", 14, R.color.farm_muted), 4);
+                continue;
+            }
+            if (!shown.ok()) {
+                LinearLayout card = ui.card(accountList);
+                MaterialButton retry = ui.button("重试", Ui.Tone.TEXT, () -> retryAccounts(server)); retry.setMinHeight(ui.dp(36)); retry.setMinimumHeight(ui.dp(36));
+                ui.listRow(card, ui.dot(R.color.farm_danger), shown.error(), server.host(), retry, null);
+                continue;
+            }
+            if (shown.accounts().isEmpty()) {
+                LinearLayout body = ui.padded(ui.card(accountList));
+                ui.add(body, ui.text("还没有账号。获取 Code 后推送即可新增。", 14, R.color.farm_muted), 4);
+                continue;
+            }
+            LinearLayout card = ui.card(accountList);
+            for (ApiClient.Account account : shown.accounts()) {
+                Boolean online = onlineCache.get(onlineKey(server, account));
+                boolean bell = watched.contains(account.id);
+                ImageView toggle = ui.iconButton(bell ? R.drawable.ic_bell : R.drawable.ic_bell_off, bell ? R.color.farm_accent : R.color.farm_line_strong,
+                        bell ? "关闭 " + account.name + " 的掉线提醒" : "开启 " + account.name + " 的掉线提醒", () -> toggleWatch(shown, account));
+                if (bell) toggle.setBackground(ui.oval(R.color.farm_tint));
+                String state = online == null ? (account.running ? "检查中" : "已停止") : online ? "在线" : "离线";
+                int tone = online == null ? R.color.farm_line_strong : online ? R.color.farm_accent : R.color.farm_danger;
+                ui.listRow(card, ui.dot(tone), account.name, account.identityLabel() + " · " + state, toggle, () -> relogin(shown.client(), account));
+            }
         }
         TextView hint = ui.text("点账号重新登录，点铃铛开关该账号的掉线提醒。", 12, R.color.farm_muted);
         hint.setPadding(ui.dp(6), ui.dp(10), ui.dp(6), 0); ui.add(accountList, hint, 0);
     }
-    private void toggleWatch(ApiClient.Account account) {
-        Set<String> watched = AppState.settings.monitoredIds();
-        if (!watched.remove(account.id)) watched.add(account.id);
-        AppState.settings.monitor(watched); syncMonitor(false);
+    private void toggleAllWatched(SettingsStore server, ServerDirectory.Group group) {
+        if (!group.current()) { message("服务器配置已变化，请刷新账号"); return; }
+        Set<String> watched = server.monitoredIds();
+        boolean all = group.accounts().stream().allMatch(a -> watched.contains(a.id));
+        for (ApiClient.Account account : group.accounts()) { if (all) watched.remove(account.id); else watched.add(account.id); }
+        server.monitor(watched); syncMonitor(false);
         renderAccounts(); refresh();
     }
-    private void relogin(ApiClient.Account account) {
+    private void toggleWatch(ServerDirectory.Group group, ApiClient.Account account) {
+        if (!group.current()) { message("服务器配置已变化，请刷新账号"); return; }
+        SettingsStore server = group.server();
+        Set<String> watched = server.monitoredIds();
+        if (!watched.remove(account.id)) watched.add(account.id);
+        server.monitor(watched); syncMonitor(false);
+        renderAccounts(); refresh();
+    }
+    private void relogin(ApiClient client, ApiClient.Account account) {
+        if (isFinishing() || isDestroyed()) return;
+        if (!client.isCurrent()) { message("服务器配置已变化，请刷新账号"); return; }
+        SettingsStore server = client.profile();
         CapturePlatform platform;
         try { platform = CapturePlatform.fromId(account.platform); } catch (IllegalArgumentException e) { message(e.getMessage()); return; }
+        boolean many = AppState.settings.readyServers().size() > 1;
         new MaterialAlertDialogBuilder(this).setTitle("重新登录「" + account.name + "」？")
-                .setMessage(account.identityLabel() + "\n" + (platform == CapturePlatform.WECHAT ? "将打开微信扫码登录。" : "请先在 QQ 中切换到这个账号，然后开始获取。"))
+                .setMessage(account.identityLabel() + (many ? "\n服务器：" + server.label() : "") + "\n"
+                        + (platform == CapturePlatform.WECHAT ? "将打开微信扫码登录。" : "请先在 QQ 中切换到这个账号，然后开始获取。"))
                 .setNegativeButton("取消", null).setPositiveButton("继续", (d, w) -> {
+                    if (!client.isCurrent()) { message("服务器配置已变化，请刷新账号"); return; }
                     if (!switchPlatform(platform)) return;
-                    AppState.settings.target(account);
-                    if (platform == CapturePlatform.WECHAT) { wechatVpn = false; startActivity(new Intent(this, WxLoginActivity.class)); }
+                    server.target(account);
+                    if (platform == CapturePlatform.WECHAT) {
+                        wechatVpn = false; startActivity(new Intent(this, WxLoginActivity.class).putExtra("profile", server.id()));
+                    }
                     if (page == 1) showPage(); else navigation.setSelectedItemId(R.id.nav_capture);
                 }).show();
     }
@@ -688,52 +759,17 @@ public final class MainActivity extends AppCompatActivity {
     private void settingsPage() {
         header("设置");
         ui.section(content, "服务器");
-        LinearLayout server = ui.padded(ui.card(content));
-        TextInputEditText address = ui.input(server, "服务器地址", AppState.settings.server(), false);
-        address.setId(R.id.server_address);
-        address.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        address.setImeOptions(EditorInfo.IME_ACTION_NEXT | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
-        Ui.field(address).setPlaceholderText("https://farm.example.com");
-        TextInputEditText token = ui.input(server, AppState.settings.hasToken() ? "管理 Token（已保存，留空不变）" : "管理 Token", "", true);
-        token.setId(R.id.server_token);
-        MaterialSwitch http = new MaterialSwitch(this); http.setId(R.id.server_http); http.setChecked(AppState.settings.allowHttp());
-        http.setText("允许 HTTP（明文）"); http.setTextSize(15); http.setTextColor(getColor(R.color.farm_ink)); http.setMinHeight(ui.dp(48));
-        http.setOnCheckedChangeListener((button, on) -> {
-            if (on && button.isPressed()) new MaterialAlertDialogBuilder(this).setTitle("允许 HTTP？")
-                    .setMessage("HTTP 会明文传输管理 Token 和 Code，建议为服务器配置 HTTPS。")
-                    .setNegativeButton("取消", (d, w) -> http.setChecked(false)).setPositiveButton("允许", null)
-                    .setOnCancelListener(d -> http.setChecked(false)).show();
-        });
-        ui.add(server, http, 4);
-        TextView feedback = ui.text(AppState.settings.hasToken() ? "Token 已保存" : "", 13, R.color.farm_muted);
-        feedback.setId(R.id.server_feedback); feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        feedback.setVisibility(AppState.settings.hasToken() ? View.VISIBLE : View.GONE); ui.add(server, feedback, 8);
-        ui.button(server, "保存并测试", Ui.Tone.PRIMARY, () -> {
-            String enteredToken = Ui.value(token), enteredAddress = Ui.value(address); boolean allowHttp = http.isChecked();
-            Ui.field(address).setError(null); Ui.field(token).setError(null);
-            try { UrlPolicy.server(enteredAddress, allowHttp); }
-            catch (IllegalArgumentException error) { Ui.field(address).setError(error.getMessage()); address.requestFocus(); return; }
-            if (enteredToken.isEmpty() && (!AppState.settings.hasToken()
-                    || !UrlPolicy.server(enteredAddress, allowHttp).toString().equals(AppState.settings.server()))) {
-                Ui.field(token).setError("请填写管理 Token"); token.requestFocus(); return;
-            }
-            dismissKeyboard();
-            async("正在连接", () -> {
-                boolean changed = AppState.settings.saveServer(enteredAddress, enteredToken, allowHttp);
-                if (changed) { stopService(new Intent(this, AccountMonitorService.class)); AppState.clearCapture(); }
-                runOnUiThread(() -> { token.setText(""); Ui.field(token).setHint("管理 Token（已保存，留空不变）"); });
-                String result;
-                try { result = new ApiClient(AppState.settings).ping(); }
-                catch (Exception error) { result = error instanceof ApiClient.AuthException ? "已保存，但 Token 无效" : "已保存，但暂时无法连接"; }
-                String text = result;
-                runOnUiThread(() -> { feedback.setText(text); feedback.setVisibility(View.VISIBLE); });
-            });
-        }).setId(R.id.save_server);
-        token.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
-        token.setOnEditorActionListener((v, action, event) -> {
-            if (action != EditorInfo.IME_ACTION_DONE) return false;
-            server.findViewById(R.id.save_server).performClick(); return true;
-        });
+        LinearLayout servers = ui.card(content);
+        for (SettingsStore server : AppState.settings.servers()) {
+            View dot = ui.dot(R.color.farm_line_strong);
+            TextView line = ui.listRow(servers, dot, server.label(), "", null, () -> serverSheet(server));
+            serverDots.put(server.id(), dot); serverLines.put(server.id(), line);
+            showServerState(server);
+        }
+        TextView add = ui.listRow(servers, ui.icon(R.drawable.ic_add, R.color.farm_accent, 20), "添加服务器", null, null, () -> serverSheet(null));
+        ((TextView) ((LinearLayout) add.getParent()).getChildAt(0)).setTextColor(getColor(R.color.farm_accent));
+        add.setId(R.id.configure_server);
+        pingServers();
 
         ui.section(content, "推送");
         LinearLayout push = ui.card(content);
@@ -786,14 +822,117 @@ public final class MainActivity extends AppCompatActivity {
         ui.ripple((View) mirror.getParent().getParent());
         ui.listRow(updates, "源代码", null, null, () -> openWeb("https://github.com/" + UrlPolicy.REPOSITORY));
 
-        LinearLayout danger = ui.row(); danger.setGravity(Gravity.CENTER); danger.setPadding(0, ui.dp(20), 0, 0);
-        ui.button(danger, "清除服务器设置", Ui.Tone.DANGER, R.drawable.ic_delete, () -> new MaterialAlertDialogBuilder(this).setTitle("清除服务器设置？")
-                .setMessage("将停止掉线提醒并删除服务器地址和 Token。服务器上的账号与已安装的证书不受影响。")
-                .setNegativeButton("取消", null).setPositiveButton("清除", (d, w) -> {
-                    stopService(new Intent(this, AccountMonitorService.class)); AppState.settings.monitorEnabled(false);
-                    AppState.settings.forgetServer(); AppState.clearCapture(); showPage();
-                }).show());
-        ui.add(content, danger, 0);
+    }
+    /** Dot and subtitle of one server row: host when named, plus the outcome of the last contact. */
+    private static String serverKey(SettingsStore server) { return server.id() + "/" + server.connectionId(); }
+    private void showServerState(SettingsStore server) {
+        View dot = serverDots.get(server.id()); TextView line = serverLines.get(server.id());
+        if (dot == null || line == null) return;
+        String status = server.ready() ? serverStatus.get(serverKey(server)) : "未填写 Token";
+        dot.setBackground(ui.oval(status == null ? R.color.farm_line_strong : status.isEmpty() ? R.color.farm_accent : R.color.farm_danger));
+        String host = server.name().isEmpty() ? "" : server.host();
+        String state = status == null ? "" : status.isEmpty() ? "已连接" : status;
+        line.setText(host.isEmpty() ? state : state.isEmpty() ? host : host + " · " + state);
+        line.setVisibility(line.length() == 0 ? View.GONE : View.VISIBLE);
+    }
+    private void pingServers() {
+        for (SettingsStore server : AppState.settings.readyServers()) {
+            String key = serverKey(server);
+            AppState.IO.execute(() -> {
+            String status;
+            try { new ApiClient(server).ping(); status = ""; }
+            catch (Exception error) { status = ServerDirectory.reason(error); }
+            String result = status;
+            runOnUiThread(() -> {
+                if (isDestroyed() || !key.equals(serverKey(server))) return;
+                serverStatus.put(key, result); showServerState(server);
+            });
+            });
+        }
+    }
+    /** Add a server ({@code existing == null}) or edit one; deleting lives here too, next to what it deletes. */
+    private void serverSheet(@Nullable SettingsStore existing) {
+        boolean adding = existing == null;
+        SettingsStore server = adding ? AppState.settings.draftServer() : existing;
+        LinearLayout body = ui.column();
+        BottomSheetDialog sheet = sheet(adding ? "添加服务器" : "编辑服务器", body);
+        TextInputEditText name = ui.input(body, "名称（可选）", server.name(), false);
+        Ui.field(name).setPlaceholderText("如：家里、云服务器");
+        TextInputEditText address = ui.input(body, "服务器地址", server.server(), false);
+        address.setId(R.id.server_address);
+        address.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        Ui.field(address).setPlaceholderText("https://farm.example.com");
+        TextInputEditText token = ui.input(body, server.hasToken() ? "管理 Token（已保存，留空不变）" : "管理 Token", "", true);
+        token.setId(R.id.server_token);
+        MaterialSwitch http = new MaterialSwitch(this); http.setId(R.id.server_http); http.setChecked(server.allowHttp());
+        http.setText("允许 HTTP（明文）"); http.setTextSize(15); http.setTextColor(getColor(R.color.farm_ink)); http.setMinHeight(ui.dp(48));
+        http.setOnCheckedChangeListener((button, on) -> {
+            if (on && button.isPressed()) new MaterialAlertDialogBuilder(this).setTitle("允许 HTTP？")
+                    .setMessage("HTTP 会明文传输管理 Token 和 Code，建议为服务器配置 HTTPS。")
+                    .setNegativeButton("取消", (d, w) -> http.setChecked(false)).setPositiveButton("允许", null)
+                    .setOnCancelListener(d -> http.setChecked(false)).show();
+        });
+        ui.add(body, http, 4);
+        TextView feedback = ui.text("", 13, R.color.farm_muted);
+        feedback.setId(R.id.server_feedback); feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        feedback.setVisibility(View.GONE); ui.add(body, feedback, 8);
+        ui.button(body, adding ? "添加并测试" : "保存并测试", Ui.Tone.PRIMARY, () -> {
+            String enteredToken = Ui.value(token), enteredAddress = Ui.value(address), label = Ui.value(name);
+            boolean allowHttp = http.isChecked();
+            Ui.field(address).setError(null); Ui.field(token).setError(null);
+            try { UrlPolicy.server(enteredAddress, allowHttp); }
+            catch (IllegalArgumentException error) { Ui.field(address).setError(error.getMessage()); address.requestFocus(); return; }
+            if (enteredToken.isEmpty() && (!server.hasToken()
+                    || !UrlPolicy.server(enteredAddress, allowHttp).toString().equals(server.server()))) {
+                Ui.field(token).setError("请填写管理 Token"); token.requestFocus(); return;
+            }
+            if (label.length() > 20) { Ui.field(name).setError("名称最多 20 个字"); return; }
+            dismissKeyboard();
+            async("正在连接", () -> {
+                try { server.saveServer(enteredAddress, enteredToken, allowHttp); }
+                catch (IllegalArgumentException duplicate) {
+                    runOnUiThread(() -> Ui.field(address).setError(duplicate.getMessage())); return;
+                }
+                server.name(label);
+                String key = serverKey(server);
+                String status;
+                try { new ApiClient(server).ping(); status = ""; }
+                catch (Exception error) { status = ServerDirectory.reason(error); }
+                String result = status;
+                runOnUiThread(() -> {
+                    if (!key.equals(serverKey(server)) || isDestroyed()) return;
+                    accountGroups.remove(server.id()); serverLoads.remove(server.id());
+                    serverStatus.put(key, result);
+                    syncMonitor(false);
+                    if (result.isEmpty()) { message("已连接 " + server.label()); sheet.dismiss(); return; }
+                    token.setText(""); Ui.field(token).setHint("管理 Token（已保存，留空不变）");
+                    feedback.setText("已保存，但" + result + "。可以稍后再试。"); feedback.setVisibility(View.VISIBLE);
+                });
+            });
+        }).setId(R.id.save_server);
+        token.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+        token.setOnEditorActionListener((v, action, event) -> {
+            if (action != EditorInfo.IME_ACTION_DONE) return false;
+            body.findViewById(R.id.save_server).performClick(); return true;
+        });
+        if (!adding) {
+            LinearLayout danger = ui.row(); danger.setGravity(Gravity.CENTER); danger.setPadding(0, ui.dp(8), 0, 0);
+            ui.button(danger, "删除这个服务器", Ui.Tone.DANGER, R.drawable.ic_delete, () -> new MaterialAlertDialogBuilder(this)
+                    .setTitle("删除「" + server.label() + "」？")
+                    .setMessage("会删除这里保存的地址、Token 和掉线提醒选择。服务器上的账号不受影响。")
+                    .setNegativeButton("取消", null).setPositiveButton("删除", (d, w) -> {
+                        if (busy) { message("上一项操作尚未完成，请稍后删除"); return; }
+                        String key = serverKey(server);
+                        server.removeServer(); accountGroups.remove(server.id()); serverStatus.remove(key); serverLoads.remove(server.id());
+                        syncMonitor(false); sheet.dismiss();
+                    }).show());
+            ui.add(body, danger, 0);
+        }
+        sheet.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        sheet.getBehavior().setState(com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED);
+        sheet.getBehavior().setSkipCollapsed(true);
+        sheet.setOnDismissListener(d -> { if (page == 4 || page == 2) showPage(); });
+        sheet.show();
     }
     private interface Accept { void apply(String value) throws Exception; }
     private void setOverlayEnabled(boolean enabled) {
@@ -840,7 +979,7 @@ public final class MainActivity extends AppCompatActivity {
         if (monitorSwitch != null) {
             boolean enabled = AppState.settings.monitorEnabled();
             monitorSwitch.setTag(Boolean.TRUE); monitorSwitch.setChecked(enabled); monitorSwitch.setTag(null);
-            int count = AppState.settings.monitoredIds().size();
+            int count = AppState.settings.monitoredCount();
             String last = AppState.monitorLastCheckedAt == 0 ? "" : " · " + java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(new java.util.Date(AppState.monitorLastCheckedAt));
             monitorStatus.setText(!enabled ? (count == 0 ? "已关闭" : "已关闭 · 已选 " + count + " 个账号")
                     : count == 0 ? "已开启 · 未选择账号" : AppState.monitoring ? "正在提醒 " + count + " 个账号" + last : notificationsAllowed() ? "已开启 · 正在启动" : "已开启 · 需要允许通知");
@@ -855,8 +994,8 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void configureServer() { dismissKeyboard(); navigation.setSelectedItemId(R.id.nav_settings); }
     private boolean requireServer() {
-        if (!AppState.settings.server().isEmpty() && AppState.settings.hasToken()) return true;
-        configureServer(); message("请先填写服务器地址和 Token"); return false;
+        if (AppState.settings.hasServer()) return true;
+        configureServer(); message("请先添加服务器"); return false;
     }
     private void dismissKeyboard() {
         getSystemService(InputMethodManager.class).hideSoftInputFromWindow(root.getWindowToken(), 0); root.requestFocus();
@@ -1004,7 +1143,7 @@ public final class MainActivity extends AppCompatActivity {
     private void message(String text) { if (!isFinishing() && !isDestroyed()) Toast.makeText(this, text, Toast.LENGTH_LONG).show(); }
     private void openSettings(Intent intent) { try { startActivity(intent); } catch (Exception e) { message("系统未提供此入口"); } }
     private void openWeb(String address) {
-        try { Uri uri = Uri.parse(UrlPolicy.server(address, AppState.settings.allowHttp()).toString()); startActivity(new Intent(Intent.ACTION_VIEW, uri)); }
+        try { Uri uri = Uri.parse(UrlPolicy.server(address, false).toString()); startActivity(new Intent(Intent.ACTION_VIEW, uri)); }
         catch (Exception e) { message("地址无效或没有可用浏览器"); }
     }
 }

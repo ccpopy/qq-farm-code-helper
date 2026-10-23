@@ -35,9 +35,15 @@ public final class WxLoginActivity extends AppCompatActivity {
         Ui.secure(getWindow());
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         model = new ViewModelProvider(this).get(WxLoginModel.class);
-        if (savedInstanceState == null && model.phase == WxLoginModel.Phase.IDLE
-                && AppState.settings.targetPlatform().equals("wx") && !AppState.settings.targetId().isEmpty()) {
-            model.targetId = AppState.settings.targetId(); model.targetLabel = AppState.settings.targetName();
+        if (model.phase == WxLoginModel.Phase.IDLE && model.profileId.isEmpty()) {
+            if (savedInstanceState != null && savedInstanceState.containsKey("wxProfile")) {
+                model.profileId = savedInstanceState.getString("wxProfile", "");
+                model.profileConnection = savedInstanceState.getString("wxConnection", "");
+                model.profileLabel = savedInstanceState.getString("wxServerLabel", "");
+                model.targetId = savedInstanceState.getString("wxTarget", "");
+                model.targetLabel = savedInstanceState.getString("wxTargetLabel", "新增账号");
+                model.baseName = savedInstanceState.getString("wxBaseName", "");
+            } else preselect();
         }
         ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true);
         scroll.setBackgroundColor(getColor(R.color.farm_surface));
@@ -66,7 +72,7 @@ public final class WxLoginActivity extends AppCompatActivity {
         android.graphics.drawable.GradientDrawable wash = new android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
                 new int[]{getColor(R.color.farm_hero), getColor(R.color.farm_card)});
-        wash.setCornerRadius(ui.dp(28)); hero.setBackground(wash);
+        wash.setCornerRadius(ui.dp(16)); hero.setBackground(wash);
         hero.setPadding(ui.dp(20), ui.dp(28), ui.dp(20), ui.dp(24));
         FrameLayout stage = new FrameLayout(this);
         badge = new FrameLayout(this); badge.setBackground(ui.oval(R.color.farm_tint)); badge.setElevation(ui.dp(2));
@@ -89,12 +95,22 @@ public final class WxLoginActivity extends AppCompatActivity {
     @Override protected void onPause() { AppState.appVisible = false; AppState.changed(); super.onPause(); }
     @Override protected void onStart() { super.onStart(); model.listener = this::render; render(); }
     @Override protected void onStop() { model.listener = null; super.onStop(); }
+    @Override protected void onSaveInstanceState(Bundle state) {
+        // Only the destination survives process death; QR tasks and login credentials do not.
+        state.putString("wxProfile", model.profileId); state.putString("wxConnection", model.profileConnection);
+        state.putString("wxServerLabel", model.profileLabel); state.putString("wxTarget", model.targetId);
+        state.putString("wxTargetLabel", model.targetLabel); state.putString("wxBaseName", model.baseName);
+        super.onSaveInstanceState(state);
+    }
     private void render() {
         if (isFinishing() || isDestroyed() || status == null) return;
         WxLoginModel.Phase phase = model.phase;
         boolean editable = model.canStart();
         accountRow.setEnabled(editable && !choosing); accountRow.setAlpha(editable ? 1f : .6f);
-        destination.setText(model.draft != null ? model.draft.name() : model.targetId.isEmpty() ? "新增账号" : model.targetLabel);
+        String account = model.draft != null ? model.draft.name() : model.targetId.isEmpty() ? "新增账号" : model.targetLabel;
+        boolean many = AppState.settings.readyServers().size() > 1;
+        String serverLabel = model.profileLabel.isEmpty() ? "未选择服务器" : model.profileLabel;
+        destination.setText(many || !model.selectionCurrent() ? serverLabel + " · " + account : account);
         destination.setVisibility(View.VISIBLE);
         status.setText(model.status); detail.setText(model.detail);
         detail.setVisibility(model.detail.isEmpty() ? View.GONE : View.VISIBLE);
@@ -156,28 +172,45 @@ public final class WxLoginActivity extends AppCompatActivity {
         boolean opened = WechatScanner.open(this);
         Toast.makeText(this, opened ? "扫描另一台设备上显示的二维码" : "请在微信「+」›「扫一扫」中扫码", Toast.LENGTH_LONG).show();
     }
+    /**
+     * Start from the account the user came for: the one opened from the accounts page or a
+     * notification, otherwise the last account pushed to; else a new account on the first server.
+     */
+    private void preselect() {
+        String requested = getIntent().getStringExtra("profile");
+        SettingsStore server = AppState.settings.server(requested != null ? requested : AppState.settings.lastServer());
+        if ((server == null || !server.ready()) && requested == null) {
+            List<SettingsStore> ready = AppState.settings.readyServers();
+            server = ready.isEmpty() ? null : ready.get(0);
+        }
+        if (server == null || !server.ready()) {
+            model.profileId = requested == null ? "" : requested;
+            return;
+        }
+        model.selectServer(server);
+        if (server.targetPlatform().equals("wx") && !server.targetId().isEmpty()) {
+            model.targetId = server.targetId(); model.targetLabel = server.targetName();
+        }
+    }
     private void chooseAccount() {
         if (!model.canStart() || choosing) return;
         choosing = true; render();
         AppState.IO.execute(() -> {
-            try {
-                ApiClient client = new ApiClient(AppState.settings);
-                List<ApiClient.Account> accounts = new ArrayList<>();
-                for (ApiClient.Account account : client.accounts()) if (account.platform.equals("wx")) accounts.add(account);
-                String[] labels = new String[accounts.size() + 1]; labels[0] = "＋ 新增账号";
-                for (int i = 0; i < accounts.size(); i++) labels[i + 1] = accounts.get(i).selectionLabel();
-                runOnUiThread(() -> {
-                    if (isFinishing() || isDestroyed() || !model.canStart() || !client.isCurrent()) return;
-                    new MaterialAlertDialogBuilder(this).setTitle("登录到").setItems(labels, (dialog, which) -> {
-                        if (!model.canStart() || !client.isCurrent()) return;
-                        model.targetId = which == 0 ? "" : accounts.get(which - 1).id;
-                        model.targetLabel = which == 0 ? "新增账号" : accounts.get(which - 1).name;
-                        if (which == 0) askName(this::render); else render();
-                    }).show();
+            List<ServerDirectory.Group> groups = ServerDirectory.load(CapturePlatform.WECHAT);
+            runOnUiThread(() -> {
+                choosing = false; render();
+                if (isFinishing() || isDestroyed() || !model.canStart()) return;
+                if (groups.isEmpty()) { Toast.makeText(this, "请先在设置中添加服务器", Toast.LENGTH_LONG).show(); return; }
+                AccountPicker.show(this, "登录到", groups, (group, account) -> {
+                    if (!model.canStart() || !group.current()) return;
+                    model.selectServer(group.server()); model.targetId = account.id; model.targetLabel = account.name;
+                    render();
+                }, "新增微信账号", group -> {
+                    if (!model.canStart() || !group.current()) return;
+                    model.selectServer(group.server()); model.targetId = ""; model.targetLabel = "新增账号";
+                    askName(this::render);
                 });
-            } catch (Exception error) {
-                runOnUiThread(() -> Toast.makeText(this, "无法读取账号，请检查服务器设置", Toast.LENGTH_LONG).show());
-            } finally { runOnUiThread(() -> { choosing = false; render(); }); }
+            });
         });
     }
     private void confirmLogin() {

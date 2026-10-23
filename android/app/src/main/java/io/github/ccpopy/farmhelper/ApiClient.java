@@ -50,6 +50,8 @@ public final class ApiClient {
         if (token.isEmpty()) throw new IOException("请先保存服务器与 Token");
     }
     public boolean isCurrent() { return connectionId.equals(settings.connectionId()); }
+    /** The server profile this client talks to. */
+    public SettingsStore profile() { return settings; }
     public static final class Account {
         public final String id, name, platform, gid, uuid, qq;
         public final boolean running;

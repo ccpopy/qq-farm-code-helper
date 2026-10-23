@@ -14,6 +14,19 @@ public final class WxLoginModel extends AndroidViewModel {
     public Phase phase = Phase.IDLE;
     public String status = "准备就绪", detail = "";
     public String targetId = "", targetLabel = "新增账号", baseName = "";
+    /** Pin the selected profile and its credential generation; never fall back to another server. */
+    public String profileId = "", profileConnection = "", profileLabel = "";
+    public SettingsStore server() {
+        return AppState.settings.server(profileId);
+    }
+    public void selectServer(SettingsStore server) {
+        profileId = server.id(); profileConnection = server.connectionId(); profileLabel = server.label();
+    }
+    public boolean selectionCurrent() {
+        SettingsStore selected = server();
+        return selected != null && selected.ready() && !profileConnection.isEmpty()
+                && profileConnection.equals(selected.connectionId());
+    }
     public final String nonce = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 12);
     public ApiClient.WxDraft draft;
     public Uri image;
@@ -34,6 +47,11 @@ public final class WxLoginModel extends AndroidViewModel {
             && (phase == Phase.WAITING || phase == Phase.SCANNED || phase == Phase.AUTHORIZED); }
     public void start(boolean openScanner) {
         if (!canStart()) return;
+        if (!selectionCurrent()) {
+            status = "所选服务器已删除或设置已变化，请重新选择「登录到」"; detail = ""; changed(); return;
+        }
+        final SettingsStore selectedServer = server();
+        final String selectedConnection = profileConnection;
         final String id = targetId, base = baseName;
         final String name;
         try { name = id.isEmpty() ? AccountNamePolicy.unique(base, nonce) : ""; }
@@ -44,7 +62,8 @@ public final class WxLoginModel extends AndroidViewModel {
         io.execute(() -> {
             ApiClient api = null; ApiClient.WxTask created = null;
             try {
-                api = new ApiClient(AppState.settings);
+                api = new ApiClient(selectedServer);
+                if (!selectedConnection.equals(api.connectionId)) throw new Exception("服务器配置已变化，请重新选择「登录到」");
                 ApiClient.WxDraft selected = api.prepareWxAccount(id, base, name);
                 if (run != generation) return;
                 created = api.createWxTask();
