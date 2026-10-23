@@ -12,20 +12,27 @@ public record TlsHello(byte[] consumed, String serverName) {
         ByteArrayOutputStream handshake = new ByteArrayOutputStream();
         while (consumed.size() < 65536) {
             byte[] header = exact(input, 5); consumed.write(header);
-            int length = ((header[3] & 255) << 8) | (header[4] & 255);
-            if (length > 18432 || consumed.size() + length > 65536) throw new IOException("TLS 握手超过安全限制");
-            byte[] record = exact(input, length); consumed.write(record);
+            // Inspection limits must not block unrelated protocols on port 443.
+            // Return every byte already read and let the proxy relay the rest.
             if (header[0] != 22 || header[1] != 3) return new TlsHello(consumed.toByteArray(), "");
+            int length = ((header[3] & 255) << 8) | (header[4] & 255);
+            if (length > 18432 || consumed.size() + length > 65536) return new TlsHello(consumed.toByteArray(), "");
+            byte[] record = exact(input, length); consumed.write(record);
             handshake.write(record);
             byte[] body = handshake.toByteArray();
             if (body.length >= 4) {
                 if (body[0] != 1) return new TlsHello(consumed.toByteArray(), "");
                 int total = ((body[1] & 255) << 16) | ((body[2] & 255) << 8) | (body[3] & 255);
-                if (total > 65532) throw new IOException("TLS ClientHello 过大");
-                if (body.length >= total + 4) return new TlsHello(consumed.toByteArray(), name(body));
+                if (total > 65532) return new TlsHello(consumed.toByteArray(), "");
+                if (body.length >= total + 4) {
+                    String serverName;
+                    try { serverName = name(body); }
+                    catch (IOException unrecognized) { serverName = ""; }
+                    return new TlsHello(consumed.toByteArray(), serverName);
+                }
             }
         }
-        throw new IOException("TLS 握手过大");
+        return new TlsHello(consumed.toByteArray(), "");
     }
     private static String name(byte[] data) throws IOException {
         try {

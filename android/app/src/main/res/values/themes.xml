@@ -1,22 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.FarmHelper" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="colorPrimary">#276554</item>
-        <item name="colorOnPrimary">#FFFFFF</item>
-        <item name="colorSecondary">#416E87</item>
+        <item name="colorPrimary">@color/farm_accent</item>
+        <item name="colorOnPrimary">@color/farm_on_accent</item>
+        <item name="colorPrimaryContainer">@color/farm_tint</item>
+        <item name="colorOnPrimaryContainer">@color/farm_ink</item>
+        <item name="colorSecondary">@color/farm_accent</item>
         <item name="colorSecondaryContainer">@color/farm_tint</item>
         <item name="colorOnSecondaryContainer">@color/farm_ink</item>
-        <item name="colorSurface">@color/farm_surface</item>
+        <item name="colorSurface">@color/farm_card</item>
+        <item name="colorSurfaceContainerHigh">@color/farm_card</item>
+        <item name="colorSurfaceContainerHighest">@color/farm_card</item>
         <item name="colorOnSurface">@color/farm_ink</item>
+        <item name="colorOnSurfaceVariant">@color/farm_muted</item>
+        <item name="colorOutline">@color/farm_line_strong</item>
+        <item name="colorError">@color/farm_danger</item>
+        <item name="android:colorBackground">@color/farm_surface</item>
+        <item name="android:windowBackground">@color/farm_surface</item>
         <item name="android:windowLightStatusBar">@bool/light_system_bars</item>
-        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightNavigationBar">@bool/light_system_bars</item>
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:windowSoftInputMode">adjustResize</item>
     </style>
-    <color name="farm_surface">#F2F6F5</color>
-    <color name="farm_ink">#203C35</color>
-    <color name="farm_card">#FFFFFF</color>
-    <color name="farm_muted">#5F736C</color>
-    <color name="farm_accent">#276554</color>
-    <color name="farm_tint">#DAEBE3</color>
 </resources>

@@ -23,9 +23,12 @@ public final class Notifications {
         manager.createNotificationChannel(alerts);
     }
     private static PendingIntent open(Context context, String accountId, int request) {
+        return open(context, accountId, "", request);
+    }
+    private static PendingIntent open(Context context, String accountId, String uuid, int request) {
         Intent intent = new Intent(context, MainActivity.class).setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         if (accountId != null && !accountId.isEmpty()) intent.putExtra("accountId", accountId)
-                .putExtra("server", AppState.settings.server()).putExtra("connectionId", AppState.settings.connectionId());
+                .putExtra("server", AppState.settings.server()).putExtra("connectionId", AppState.settings.connectionId()).putExtra("accountUuid", uuid);
         return PendingIntent.getActivity(context, request, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
     public static Notification ongoing(Context context, Class<?> service, String title, String detail, int id) {
@@ -36,6 +39,9 @@ public final class Notifications {
                 .setContentIntent(open(context, null, id)).addAction(0, "停止", action).build();
     }
     public static void alert(Context context, String id, String title, String message) {
+        alert(context, id, "", title, message);
+    }
+    public static void alert(Context context, String id, String uuid, String title, String message) {
         if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             AppState.log("通知", "通知权限未开启，提醒仅显示在应用中"); return;
         }
@@ -43,7 +49,7 @@ public final class Notifications {
         context.getSystemService(NotificationManager.class).notify(notificationId,
                 new NotificationCompat.Builder(context, ALERT).setSmallIcon(R.drawable.ic_farm).setContentTitle(title)
                         .setContentText(message).setStyle(new NotificationCompat.BigTextStyle().bigText(message))
-                        .setContentIntent(open(context, id, notificationId)).setAutoCancel(true)
+                        .setContentIntent(open(context, id, uuid, notificationId)).setAutoCancel(true)
                         .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).build());
     }
     public static void serverAuth(Context context) {

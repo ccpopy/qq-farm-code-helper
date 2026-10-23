@@ -14,26 +14,51 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Date;
+import java.util.ArrayList;
+import java.util.List;
 
-/** Narrow DER encoder for our RSA/SHA-256 root and one DNS-only leaf; no crypto provider dependency. */
+/** Narrow DER encoder for our RSA/SHA-256 root and DNS-only leaves; no crypto provider dependency. */
 public final class DerCertificate {
     private static final byte[] RSA_SHA256 = seq(oid("1.2.840.113549.1.1.11"), tag(5, new byte[0]));
     private DerCertificate() {}
     public static X509Certificate issue(String subject, PublicKey publicKey, String issuer, PrivateKey issuerKey,
                                          boolean ca, Date notBefore, Date notAfter) throws Exception {
+        return issue(name(subject), publicKey, name(issuer), issuerKey, ca, notBefore, notAfter, List.of(subject));
+    }
+    /** The caller must authenticate the remote certificate with TLS chain and hostname checks first.
+     * Mirrors ProxyPin #747's Subject/DNS SAN/validity approach, never its issuer or public key. */
+    public static X509Certificate issueServer(PublicKey publicKey, X509Certificate issuer, PrivateKey issuerKey,
+                                              X509Certificate remote, String host) throws Exception {
+        issuer.checkValidity(); remote.checkValidity();
+        List<String> dnsNames = new ArrayList<>();
+        var alternatives = remote.getSubjectAlternativeNames();
+        if (alternatives != null) for (var entry : alternatives) {
+            if (entry.size() >= 2 && Integer.valueOf(2).equals(entry.get(0)) && entry.get(1) instanceof String dns)
+                dnsNames.add(dns);
+        }
+        if (dnsNames.isEmpty()) dnsNames.add(host);
+        Date before = new Date(Math.max(issuer.getNotBefore().getTime(), remote.getNotBefore().getTime()));
+        Date after = new Date(Math.min(issuer.getNotAfter().getTime(), remote.getNotAfter().getTime()));
+        return issue(remote.getSubjectX500Principal().getEncoded(), publicKey, issuer.getSubjectX500Principal().getEncoded(),
+                issuerKey, false, before, after, dnsNames);
+    }
+    private static X509Certificate issue(byte[] subject, PublicKey publicKey, byte[] issuer, PrivateKey issuerKey,
+                                          boolean ca, Date notBefore, Date notAfter, List<String> dnsNames) throws Exception {
+        if (!notAfter.after(notBefore)) throw new IllegalArgumentException("证书有效期没有交集");
         byte[] extensions;
         if (ca) {
             extensions = seq(extension("2.5.29.19", true, seq(tag(1, new byte[]{(byte)255}), integer(BigInteger.ZERO))),
                     extension("2.5.29.15", true, tag(3, new byte[]{1, 6})));
         } else {
+            byte[][] names = dnsNames.stream().map(dns -> tag(0x82, dns.getBytes(StandardCharsets.US_ASCII))).toArray(byte[][]::new);
             extensions = seq(extension("2.5.29.19", true, seq()),
                     extension("2.5.29.15", true, tag(3, new byte[]{5, (byte)0xa0})),
                     extension("2.5.29.37", false, seq(oid("1.3.6.1.5.5.7.3.1"))),
-                    extension("2.5.29.17", false, seq(tag(0x82, subject.getBytes(StandardCharsets.US_ASCII)))));
+                    extension("2.5.29.17", false, seq(names)));
         }
         byte[] tbs = seq(tag(0xa0, integer(BigInteger.valueOf(2))),
-                integer(new BigInteger(128, new SecureRandom()).setBit(127)), RSA_SHA256, name(issuer),
-                seq(time(notBefore), time(notAfter)), name(subject), publicKey.getEncoded(), tag(0xa3, extensions));
+                integer(new BigInteger(128, new SecureRandom()).setBit(127)), RSA_SHA256, issuer,
+                seq(time(notBefore), time(notAfter)), subject, publicKey.getEncoded(), tag(0xa3, extensions));
         Signature signature = Signature.getInstance("SHA256withRSA");
         signature.initSign(issuerKey); signature.update(tbs);
         byte[] signed = signature.sign();
@@ -43,7 +68,9 @@ public final class DerCertificate {
     }
     private static byte[] name(String value) { return seq(tag(0x31, seq(oid("2.5.4.3"), tag(0x0c, value.getBytes(StandardCharsets.UTF_8))))); }
     private static byte[] time(Date value) {
-        return tag(0x17, DateTimeFormatter.ofPattern("yyMMddHHmmss'Z'").withZone(ZoneOffset.UTC)
+        int year = value.toInstant().atZone(ZoneOffset.UTC).getYear();
+        boolean utc = year >= 1950 && year < 2050;
+        return tag(utc ? 0x17 : 0x18, DateTimeFormatter.ofPattern(utc ? "yyMMddHHmmss'Z'" : "yyyyMMddHHmmss'Z'").withZone(ZoneOffset.UTC)
                 .format(Instant.ofEpochMilli(value.getTime())).getBytes(StandardCharsets.US_ASCII));
     }
     private static byte[] extension(String oid, boolean critical, byte[] content) {

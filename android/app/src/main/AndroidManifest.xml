@@ -6,7 +6,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
-    <queries><package android:name="com.tencent.mobileqq" /></queries>
+    <queries>
+        <package android:name="com.tencent.mobileqq" />
+        <package android:name="com.tencent.mm" />
+    </queries>
     <application
         android:name=".FarmApplication"
         android:allowBackup="false"
@@ -29,11 +32,12 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
+        <activity android:name=".WxLoginActivity" android:exported="false" />
         <service android:name=".CaptureVpnService" android:permission="android.permission.BIND_VPN_SERVICE"
             android:exported="false" android:foregroundServiceType="specialUse">
             <intent-filter><action android:name="android.net.VpnService" /></intent-filter>
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-initiated, time-limited QQ-only TCP/UDP forwarding with transparent diagnostic mode or narrowly scoped farm TLS inspection; persistent stop action." />
+                android:value="User-initiated TCP/UDP forwarding for one selected app (QQ or WeChat), with transparent diagnostic mode or narrowly scoped farm TLS inspection; persistent stop action." />
         </service>
         <service android:name=".AccountMonitorService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"

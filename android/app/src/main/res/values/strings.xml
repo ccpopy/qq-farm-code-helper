@@ -1,4 +1,1 @@
-<resources>
-    <string name="target_status">目标：%1$s%2$s</string>
-    <string name="monitor_status">%1$s · 已选择 %2$d 个账号</string>
-</resources>
+<resources />

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="farm_surface">#EFF4F0</color>
+    <color name="farm_card">#FFFFFF</color>
+    <color name="farm_ink">#14231C</color>
+    <color name="farm_muted">#6A7B73</color>
+    <color name="farm_accent">#2E7D57</color>
+    <color name="farm_on_accent">#FFFFFF</color>
+    <color name="farm_tint">#DCEFE3</color>
+    <color name="farm_line">#E3EAE5</color>
+    <color name="farm_line_strong">#C9D5CE</color>
+    <color name="farm_amber">#B26A0E</color>
+    <color name="farm_amber_tint">#FBEFDC</color>
+    <color name="farm_danger">#B3261E</color>
+</resources>

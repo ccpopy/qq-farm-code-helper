@@ -21,6 +21,10 @@ public final class ApiClient {
     public static final class AuthException extends IOException {
         public AuthException() { super("管理 Token 已失效或权限不足，请重新登录服务器并复制 Token"); }
     }
+    public static final class RelayUnsupportedException extends IOException {}
+    public static final class TemporaryNetworkException extends IOException {
+        TemporaryNetworkException() { super("网络连接暂时中断，请稍后重试"); }
+    }
     public ApiClient(SettingsStore settings) throws Exception {
         this.settings = settings;
         connectionId = settings.connectionId();
@@ -31,14 +35,15 @@ public final class ApiClient {
     }
     public boolean isCurrent() { return connectionId.equals(settings.connectionId()); }
     public static final class Account {
-        public final String id, name, platform, gid;
+        public final String id, name, platform, gid, uuid;
         public final boolean running;
         Account(JSONObject json) {
             id = json.optString("id"); name = json.optString("name", id);
             platform = json.optString("platform", "qq"); gid = json.optString("gid");
+            uuid = json.optString("uuid");
             running = json.optBoolean("running");
         }
-        public String label() { return name + "  ·  " + (running ? "运行中" : "已停止") + "  ·  ID " + id; }
+        public String label() { return name + "  ·  " + (platform.equals("qq") ? "QQ" : platform.equals("wx") ? "微信" : platform) + "  ·  " + (running ? "运行中" : "已停止") + "  ·  ID " + id; }
     }
     public List<Account> accounts() throws Exception {
         return parseAccounts(call("GET", "/api/accounts", null, null));
@@ -62,7 +67,7 @@ public final class ApiClient {
         for (Account account : existing) {
             if (account.name.trim().equals(baseName.trim()) || account.name.trim().equals(actualName))
                 throw new IOException("服务器已有同名备注；上游同名会更新旧账号，请改用不同备注或选择更新已有账号");
-            if (!capture.ownGid().isEmpty() && capture.ownGid().equals(account.gid))
+            if (capture.platform().id.equals(account.platform) && !capture.ownGid().isEmpty() && capture.ownGid().equals(account.gid))
                 throw new IOException("这个 GID 已存在于服务器，请选择对应账号更新，不要重复新增");
         }
         return existing;
@@ -71,7 +76,7 @@ public final class ApiClient {
         List<Account> before = checkNewAccount(baseName, actualName, capture, friends);
         if (AppState.capture() != capture) throw new IOException("结果已过期或变更，请重新获取后确认");
         JSONObject body = new JSONObject().put("name", actualName).put("code", capture.code())
-                .put("platform", "qq").put("loginType", "manual");
+                .put("platform", capture.platform().id).put("loginType", "manual");
         JSONObject response;
         try { response = call("POST", "/api/accounts", body, null); }
         catch (AuthException rejected) { throw rejected; }
@@ -85,7 +90,7 @@ public final class ApiClient {
             java.util.Set<String> previousIds = new java.util.HashSet<>();
             for (Account account : before) previousIds.add(account.id);
             for (Account account : parseAccounts(response)) {
-                if (!previousIds.contains(account.id) && actualName.equals(account.name) && account.platform.equals("qq")) {
+                if (!previousIds.contains(account.id) && actualName.equals(account.name) && account.platform.equals(capture.platform().id)) {
                     if (created != null) throw new IOException("返回多个新增账号");
                     created = account;
                 }
@@ -118,13 +123,13 @@ public final class ApiClient {
         Account target = null;
         for (Account account : accounts()) if (account.id.equals(targetId)) target = account;
         if (target == null) throw new IOException("目标账号已不存在，请重新选择");
-        if (!target.platform.equals("qq")) throw new IOException("当前抓取仅支持 QQ，请选择 QQ 账号");
+        if (!target.platform.equals(capture.platform().id)) throw new IOException("获取结果来自 " + capture.platform().label + "，请选择同一平台的账号");
         if (!capture.ownGid().isEmpty() && !target.gid.isEmpty() && !target.gid.equals(capture.ownGid()))
             throw new IOException("捕获身份与服务器 GID 不一致，已阻止更新");
         if (code) {
             if (capture.code().isEmpty()) throw new IOException("没有可推送的 Code");
             JSONObject body = new JSONObject().put("id", target.id).put("name", target.name)
-                    .put("code", capture.code()).put("platform", "qq").put("loginType", "manual");
+                    .put("code", capture.code()).put("platform", capture.platform().id).put("loginType", "manual");
             call("POST", "/api/accounts", body, null);
             AppState.consumeCode(capture);
             AppState.log("推送", "Code 已更新；正在启动对应远程账号");
@@ -143,15 +148,21 @@ public final class ApiClient {
         AppState.log("推送", "好友已增量同步，共 " + gids.size() + " 个；未覆盖原有好友");
     }
     public JSONObject call(String method, String path, JSONObject body, String accountId) throws Exception {
+        return call(method, path, body, accountId, 15_000);
+    }
+    private JSONObject call(String method, String path, JSONObject body, String accountId, int readTimeout) throws Exception {
+        return new JSONObject(new String(request(method, path, body, accountId, readTimeout, false), StandardCharsets.UTF_8));
+    }
+    private byte[] request(String method, String path, JSONObject body, String accountId, int readTimeout, boolean image) throws Exception {
         if (!isCurrent()) throw new IOException("服务器配置已变更，请重新选择账号后重试");
         HttpURLConnection connection = (HttpURLConnection) URI.create(server + path).toURL().openConnection(Proxy.NO_PROXY);
         try {
-            connection.setConnectTimeout(10_000); connection.setReadTimeout(15_000);
+            connection.setConnectTimeout(10_000); connection.setReadTimeout(readTimeout);
             connection.setInstanceFollowRedirects(false);
             connection.setRequestMethod(method);
             connection.setRequestProperty("x-admin-token", token);
             if (accountId != null) connection.setRequestProperty("x-account-id", safeId(accountId));
-            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Accept", image ? "image/*" : "application/json");
             if (body != null) {
                 connection.setDoOutput(true);
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
@@ -161,17 +172,120 @@ public final class ApiClient {
             }
             int status = connection.getResponseCode();
             if (status == 401 || status == 403) throw new AuthException();
+            if (status == 404 && path.startsWith("/api/mobile/offline-events?")) throw new RelayUnsupportedException();
             if (status >= 300 && status < 400) throw new IOException("服务器返回跳转；为保护 Token，请直接填写最终服务器地址");
+            if (status == 404 && path.startsWith("/api/wx-login/")) throw new IOException("扫码任务已失效，或服务器尚未支持微信扫码登录，请重新获取或更新服务器");
+            if (status == 408 || status == 429 || status == 502 || status == 503 || status == 504) throw new TemporaryNetworkException();
             if (status != 200) throw new IOException("服务器请求失败（HTTP " + status + "）");
-            JSONObject result;
-            try (InputStream input = connection.getInputStream()) { result = new JSONObject(new String(readBounded(input, 4 * 1024 * 1024), StandardCharsets.UTF_8)); }
+            byte[] bytes;
+            try (InputStream input = connection.getInputStream()) { bytes = readBounded(input, 4 * 1024 * 1024); }
+            if (!isCurrent()) throw new IOException("服务器配置已变更，请重新开始");
+            if (image) return bytes;
+            JSONObject result = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
             if (!result.optBoolean("ok")) throw new IOException("服务器拒绝操作，请到管理页面检查账号和权限");
-            return result;
+            return bytes;
         } catch (javax.net.ssl.SSLException e) {
             throw new IOException("服务器 HTTPS 证书验证失败；不会忽略 TLS 错误");
-        } catch (java.net.SocketTimeoutException e) {
-            throw new IOException("连接超时，请检查服务器地址与网络");
+        } catch (java.net.UnknownHostException | java.net.SocketException | java.net.SocketTimeoutException e) {
+            throw new TemporaryNetworkException();
         } finally { connection.disconnect(); }
+    }
+    public record WxTask(String id, long expiresAt) {}
+    public record WxDraft(String id, String baseName, String name, java.util.Set<String> previousIds) {}
+    public static final class UncertainWxSaveException extends IOException {
+        UncertainWxSaveException() { super("登录提交结果未能确认。请先到服务器账号页检查，勿重复新增；本次不会自动重试提交。"); }
+    }
+    public WxDraft prepareWxAccount(String targetId, String baseName, String actualName) throws Exception {
+        List<Account> list = accounts();
+        if (!targetId.isEmpty()) {
+            for (Account account : list) if (account.id.equals(targetId)) {
+                if (!account.platform.equals("wx")) throw new IOException("只能更新微信账号");
+                return new WxDraft(account.id, "", account.name, java.util.Set.of());
+            }
+            throw new IOException("目标账号已不存在，请重新选择");
+        }
+        AccountNamePolicy.validate(baseName, actualName);
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        for (Account account : list) {
+            if (account.name.trim().equals(baseName.trim()) || account.name.trim().equals(actualName))
+                throw new IOException("已有同名账号，请选择更新已有账号或更换备注");
+            ids.add(account.id);
+        }
+        return new WxDraft("", baseName, actualName, ids);
+    }
+    public WxTask createWxTask() throws Exception {
+        JSONObject data = call("POST", "/api/wx-login/tasks", new JSONObject().put("app_id", "wx5306c5978fdb76e4"), null).getJSONObject("data");
+        String id = safeId(data.getString("task_id"));
+        long expiresAt = data.getLong("expires_at") * 1000L;
+        return new WxTask(id, expiresAt);
+    }
+    private String wxPath(WxTask task) { return "/api/wx-login/tasks/" + safeId(task.id()); }
+    public byte[] wxQr(WxTask task) throws Exception {
+        // Construct the path ourselves: a server-provided qr_url must never receive the admin token off-origin.
+        return request("GET", wxPath(task) + "/qr", null, null, 15_000, true);
+    }
+    public String wxStatus(WxTask task) throws Exception {
+        // The server holds this request while waiting for WeChat; ordinary API reads use 15 seconds.
+        return call("GET", wxPath(task) + "/status", null, null, 40_000).getJSONObject("data").getString("status");
+    }
+    public void cancelWxTask(WxTask task) throws Exception { call("DELETE", wxPath(task), null, null); }
+    public Account finishWxLogin(WxTask task, WxDraft draft) throws Exception {
+        WxDraft checked = prepareWxAccount(draft.id(), draft.baseName(), draft.name());
+        if (!checked.name().equals(draft.name())) throw new IOException("目标账号备注已变化，请重新确认");
+        call("POST", wxPath(task) + "/confirm", new JSONObject(), null, 40_000);
+        String code = call("POST", wxPath(task) + "/code", new JSONObject(), null, 40_000).getJSONObject("data").getString("code");
+        if (code.isBlank()) throw new IOException("服务器未取得农场 Code，请重新扫码");
+        JSONObject body = new JSONObject().put("name", draft.name()).put("code", code).put("platform", "wx")
+                .put("loginType", "wechat_qr").put("wxLoginTaskId", task.id());
+        if (!draft.id().isEmpty()) body.put("id", draft.id());
+        JSONObject response;
+        try { response = call("POST", "/api/accounts", body, null); }
+        catch (AuthException rejected) { throw rejected; }
+        catch (Exception uncertain) { throw new UncertainWxSaveException(); }
+        Account saved = null;
+        try {
+            for (Account account : parseAccounts(response)) {
+                boolean identity = draft.id().isEmpty() ? !checked.previousIds().contains(account.id) : account.id.equals(draft.id());
+                if (identity && account.platform.equals("wx") && account.name.equals(draft.name())) {
+                    if (saved != null) throw new UncertainWxSaveException();
+                    saved = account;
+                }
+            }
+            if (saved == null || !isCurrent()) throw new UncertainWxSaveException();
+        } catch (Exception invalid) { throw new UncertainWxSaveException(); }
+        settings.target(saved);
+        AppState.log("微信扫码", "农场 Code 与扫码会话已提交服务器；正在检查登录与好友");
+        return saved;
+    }
+    public int wechatFriendCount(String targetId) throws Exception {
+        JSONArray data = call("GET", "/api/friends?forceSync=true", null, targetId, 40_000).getJSONArray("data");
+        java.util.Set<String> gids = new java.util.HashSet<>();
+        for (int i = 0; i < data.length(); i++) {
+            String gid = data.getJSONObject(i).optString("gid");
+            if (!gid.matches("[1-9][0-9]*")) throw new IOException("好友响应缺少有效 GID，请在服务器确认");
+            gids.add(gid);
+        }
+        return gids.size();
+    }
+    public record OfflineEvent(String eventId, String accountId, String accountUuid, String platform) {}
+    public record OfflineBatch(String cursor, List<OfflineEvent> events) {}
+    public OfflineBatch offlineEvents(String cursor, java.util.Set<String> selected) throws Exception {
+        if (!cursor.matches("[A-Za-z0-9_:-]{0,100}")) throw new IOException("通知读取位置无效");
+        List<String> ids = new ArrayList<>();
+        for (String id : selected) ids.add(safeId(id));
+        if (ids.isEmpty()) throw new IOException("请先选择需要提醒的账号");
+        String path = "/api/mobile/offline-events?after=" + cursor + "&wait=25&accounts=" + String.join(",", ids);
+        JSONObject data = call("GET", path, null, null, 35_000).getJSONObject("data");
+        String next = data.getString("cursor");
+        if (!next.matches("[A-Za-z0-9_-]{1,64}:[0-9]{1,20}")) throw new IOException("服务器通知读取位置无效");
+        JSONArray array = data.getJSONArray("events"); List<OfflineEvent> events = new ArrayList<>();
+        for (int i = 0; i < array.length(); i++) {
+            JSONObject event = array.getJSONObject(i);
+            String id = safeId(event.getString("accountId")), uuid = event.getString("accountUuid");
+            if (!event.getString("type").equals("relogin_required") || uuid.isBlank()) throw new IOException("服务器通知格式不正确");
+            if (selected.contains(id)) events.add(new OfflineEvent(event.getString("eventId"), id, uuid, event.getString("platform")));
+        }
+        return new OfflineBatch(next, events);
     }
     public static byte[] readBounded(InputStream input, int limit) throws IOException {
         ByteArrayOutputStream output = new ByteArrayOutputStream();

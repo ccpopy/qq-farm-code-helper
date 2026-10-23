@@ -1,0 +1,28 @@
+diff --git a/src/hev-config.c b/src/hev-config.c
+index 5e0e03e..74a050e 100644
+--- a/src/hev-config.c
++++ b/src/hev-config.c
+@@ -436,15 +436,17 @@ hev_config_parse_misc (yaml_document_t *doc, yaml_node_t *base)
+             limit_nofile = strtol (value, NULL, 10);
+     }
+ 
+-    if (tcp_rw_timeout <= 0)
++    if (tcp_rw_timeout < 0)
+         tcp_rw_timeout = rw_timeout;
+-    if (udp_rw_timeout <= 0)
++    if (udp_rw_timeout < 0)
+         udp_rw_timeout = rw_timeout;
+ 
+-    if (tcp_rw_timeout > 0)
+-        tcp_read_write_timeout = tcp_rw_timeout;
+-    if (udp_rw_timeout > 0)
+-        udp_read_write_timeout = udp_rw_timeout;
++    /* Zero disables idle expiry. The core uses -1 for an interruptible
++     * indefinite I/O wait; zero itself is reserved for session termination. */
++    if (tcp_rw_timeout >= 0)
++        tcp_read_write_timeout = tcp_rw_timeout ? tcp_rw_timeout : -1;
++    if (udp_rw_timeout >= 0)
++        udp_read_write_timeout = udp_rw_timeout ? udp_rw_timeout : -1;
+ 
+     return 0;
+ }

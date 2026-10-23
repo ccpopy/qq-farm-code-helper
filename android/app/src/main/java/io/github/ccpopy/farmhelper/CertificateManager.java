@@ -24,6 +24,9 @@ public final class CertificateManager {
     private static final String ALIAS = "farmhelper.local-ca.rsa.v1";
     private final java.io.File file;
     private final String alias;
+    private byte[] cachedRemote;
+    private X509Certificate cachedLeaf;
+    private SSLContext cachedContext;
     public CertificateManager(Context context) { this(context, "local-ca.cer", ALIAS); }
     CertificateManager(Context context, String filename, String alias) {
         file = new java.io.File(context.getFilesDir(), filename); this.alias = alias;
@@ -68,14 +71,23 @@ public final class CertificateManager {
         Files.write(file.toPath(), ca.getEncoded());
     }
     public synchronized SSLContext serverContext() throws Exception {
+        return serverContext(null);
+    }
+    /** Cache only this VPN session's authenticated farm certificate; never fetch through the VPN. */
+    public synchronized SSLContext serverContext(X509Certificate remote) throws Exception {
         if (!exists()) throw new IllegalStateException("请先在权限与证书页面生成并安装证书");
         X509Certificate root = certificate(); root.checkValidity();
+        byte[] remoteBytes = remote == null ? null : remote.getEncoded();
+        if (remote != null) remote.checkValidity();
+        if (cachedContext != null && Arrays.equals(cachedRemote, remoteBytes)
+                && cachedLeaf.getNotAfter().getTime() > System.currentTimeMillis()) return cachedContext;
         KeyStore android = keyStore();
         PrivateKey caKey = (PrivateKey) android.getKey(alias, null);
         if (caKey == null) throw new IllegalStateException("本地证书私钥不存在，请移除旧证书并重新生成");
         KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA"); generator.initialize(2048);
         KeyPair pair = generator.generateKeyPair();
-        X509Certificate leaf = DerCertificate.issue(UrlPolicy.FARM_HOST, pair.getPublic(), NAME, caKey, false,
+        X509Certificate leaf = remote != null ? DerCertificate.issueServer(pair.getPublic(), root, caKey, remote, UrlPolicy.FARM_HOST)
+                : DerCertificate.issue(UrlPolicy.FARM_HOST, pair.getPublic(), NAME, caKey, false,
                 new Date(System.currentTimeMillis() - 300_000), new Date(Math.min(root.getNotAfter().getTime(), System.currentTimeMillis() + 7L * 86_400_000)));
         leaf.verify(root.getPublicKey());
         KeyStore keys = KeyStore.getInstance("PKCS12"); keys.load(null);
@@ -83,6 +95,7 @@ public final class CertificateManager {
         keys.setKeyEntry("leaf", pair.getPrivate(), password, new Certificate[]{leaf, root});
         KeyManagerFactory km = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()); km.init(keys, password);
         SSLContext context = SSLContext.getInstance("TLS"); context.init(km.getKeyManagers(), null, null);
+        cachedRemote = remoteBytes; cachedLeaf = leaf; cachedContext = context;
         return context;
     }
     /** This only deletes this app's material, NOT the installed system/user CA copy. */
@@ -90,6 +103,7 @@ public final class CertificateManager {
         if (AppState.capturing) throw new IllegalStateException("请先停止 VPN 再移除证书");
         keyStore().deleteEntry(alias);
         Files.deleteIfExists(file.toPath());
+        cachedRemote = null; cachedLeaf = null; cachedContext = null;
         AppState.tlsVerified = false;
     }
     private static KeyStore keyStore() throws Exception { KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null); return store; }

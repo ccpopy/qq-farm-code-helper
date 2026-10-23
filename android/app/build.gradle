@@ -2,6 +2,16 @@ plugins {
     id 'com.android.application'
 }
 
+// Shared across checkouts and agents; never create a replacement signing key.
+def farmSigningProperties = new Properties()
+def farmSigningConfig = new File(System.getProperty('user.home'), '.android/farm-helper/signing.properties')
+if (farmSigningConfig.isFile()) farmSigningConfig.withInputStream { farmSigningProperties.load(it) }
+def farmSigningFile = file(System.getenv('ANDROID_KEYSTORE_PATH') ?: new File(System.getProperty('user.home'), '.android/farm-helper/farm-helper.jks'))
+def farmStorePassword = System.getenv('ANDROID_KEYSTORE_PASSWORD') ?: farmSigningProperties.getProperty('storePassword', '')
+def farmKeyAlias = System.getenv('ANDROID_KEY_ALIAS') ?: farmSigningProperties.getProperty('keyAlias', 'androiddebugkey')
+def farmKeyPassword = System.getenv('ANDROID_KEY_PASSWORD') ?: farmSigningProperties.getProperty('keyPassword', farmStorePassword)
+def farmSigningSha256 = 'cf51c2ee1ed4870e98751894f41cb5406b7f2cd29645df2fa5186f829235c749'
+
 android {
     namespace 'io.github.ccpopy.farmhelper'
     compileSdk 36
@@ -15,13 +25,17 @@ android {
     }
 
     signingConfigs {
+        debug {
+            storeFile farmSigningFile
+            storePassword farmStorePassword
+            keyAlias farmKeyAlias
+            keyPassword farmKeyPassword
+        }
         release {
-            if (System.getenv('ANDROID_KEYSTORE_PATH')) {
-                storeFile file(System.getenv('ANDROID_KEYSTORE_PATH'))
-                storePassword System.getenv('ANDROID_KEYSTORE_PASSWORD')
-                keyAlias System.getenv('ANDROID_KEY_ALIAS')
-                keyPassword System.getenv('ANDROID_KEY_PASSWORD')
-            }
+            storeFile farmSigningFile
+            storePassword farmStorePassword
+            keyAlias farmKeyAlias
+            keyPassword farmKeyPassword
         }
     }
     buildTypes {
@@ -40,14 +54,36 @@ android {
     lint { abortOnError true }
 }
 
-def tunnelAar = file('libs/hev-socks5-tunnel-2.19.1.aar')
+tasks.register('verifyAppIdentity') {
+    doLast {
+        if (android.defaultConfig.applicationId != 'io.github.ccpopy.farmhelper' || android.buildTypes.any { it.applicationIdSuffix }) {
+            throw new GradleException('Keep the canonical package io.github.ccpopy.farmhelper; parallel diagnostic/test application IDs are no longer supported.')
+        }
+        if (!farmSigningFile.isFile()) throw new GradleException('Persistent FarmHelper signing key missing. Restore the existing key described in android/README.md; do not generate a replacement.')
+        def store = java.security.KeyStore.getInstance(farmSigningFile, farmStorePassword.toCharArray())
+        def certificate = store.getCertificate(farmKeyAlias)
+        if (certificate == null || java.security.MessageDigest.getInstance('SHA-256').digest(certificate.encoded).encodeHex().toString() != farmSigningSha256) {
+            throw new GradleException('Signing certificate differs from the installed FarmHelper identity. Use the original persistent key.')
+        }
+        if (!store.isKeyEntry(farmKeyAlias)) throw new GradleException('Signing private key is missing.')
+    }
+}
+tasks.named('preBuild').configure { dependsOn 'verifyAppIdentity' }
+
+def tunnelAar = file('libs/hev-socks5-tunnel-2.19.1-farm1.aar')
+def tunnelManifest = file("${tunnelAar}.json")
+def tunnelInputs = ['android/native/tunnel-build.json', 'android/native/disable-idle-timeouts.patch', 'scripts/build-android-tunnel.ps1']
+def repositoryRoot = rootProject.projectDir.parentFile
 tasks.register('verifyTunnel') {
     inputs.file(tunnelAar)
+    inputs.file(tunnelManifest)
+    inputs.files(tunnelInputs.collect { new File(repositoryRoot, it) })
     doLast {
         if (!tunnelAar.exists()) throw new GradleException('Run scripts/bootstrap-android.ps1 first (pinned VPN AAR).')
-        def actual = java.security.MessageDigest.getInstance('SHA-256').digest(tunnelAar.bytes).encodeHex().toString()
-        if (actual != '107958f7a07051386248ba8dba778b63d8dcefdfb2c3665b0ee9a8c93de5f6ca') {
-            throw new GradleException('VPN AAR SHA-256 mismatch. Refusing unverified native code.')
+        def digest = { input -> java.security.MessageDigest.getInstance('SHA-256').digest(input.bytes).encodeHex().toString() }
+        def manifest = new groovy.json.JsonSlurper().parse(tunnelManifest)
+        if (manifest.sha256 != digest(tunnelAar) || tunnelInputs.any { manifest.inputs[it] != digest(new File(repositoryRoot, it)) }) {
+            throw new GradleException('VPN library or build inputs changed. Run scripts/bootstrap-android.ps1 to rebuild and verify the pinned native sources.')
         }
     }
 }

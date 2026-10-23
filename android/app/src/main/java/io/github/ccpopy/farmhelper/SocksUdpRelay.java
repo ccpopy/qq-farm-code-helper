@@ -32,11 +32,12 @@ final class SocksUdpRelay implements AutoCloseable {
     private static final class Flow {
         final FlowKey key;
         final DatagramChannel channel;
-        long lastUsed = android.os.SystemClock.elapsedRealtime();
         Flow(FlowKey key, DatagramChannel channel) { this.key = key; this.channel = channel; }
     }
-    SocksUdpRelay(VpnService vpn, java.util.function.Supplier<android.net.Network> network) throws java.io.IOException {
-        this.vpn = vpn; this.network = network; selector = Selector.open(); thread = new Thread(this::loop, "farm-udp"); thread.start();
+    private final Runnable stopCapture;
+    SocksUdpRelay(VpnService vpn, java.util.function.Supplier<android.net.Network> network, Runnable stopCapture) throws java.io.IOException {
+        this.vpn = vpn; this.network = network; this.stopCapture = stopCapture;
+        selector = Selector.open(); thread = new Thread(this::loop, "farm-udp"); thread.start();
     }
     void serve(Socket control, InputStream input, OutputStream output) throws Exception {
         DatagramChannel channel = DatagramChannel.open();
@@ -79,7 +80,6 @@ final class SocksUdpRelay implements AutoCloseable {
                             FlowKey destination = new FlowKey(association, packet.target());
                             Flow flow = flows.get(destination);
                             if (flow == null) {
-                                if (flows.size() >= 64) { AppState.udpDropped++; continue; }
                                 DatagramChannel upstream = DatagramChannel.open();
                                 try {
                                     upstream.bind(new InetSocketAddress(InetAddress.getByAddress(new byte[packet.target().getAddress().getAddress().length]), 0));
@@ -92,7 +92,6 @@ final class SocksUdpRelay implements AutoCloseable {
                                     flows.put(destination, flow);
                                 } catch (Exception error) { closeChannel(upstream); throw error; }
                             }
-                            flow.lastUsed = android.os.SystemClock.elapsedRealtime();
                             if (flow.channel.write(ByteBuffer.wrap(bytes, packet.offset(), packet.length())) == packet.length()) AppState.udpPacketsOut++;
                             else AppState.udpDropped++;
                         } else if (key.attachment() instanceof Flow flow) {
@@ -102,20 +101,16 @@ final class SocksUdpRelay implements AutoCloseable {
                             byte[] response = SocksDatagram.encode(flow.key.destination(), bytes, length);
                             if (association.channel.send(ByteBuffer.wrap(response), association.client) == response.length) AppState.udpPacketsIn++;
                             else AppState.udpDropped++;
-                            flow.lastUsed = android.os.SystemClock.elapsedRealtime();
                         }
                     } catch (Exception error) {
                         AppState.udpDropped++;
                         if (key.attachment() instanceof Flow flow) { closeChannel(flow.channel); flows.remove(flow.key); }
                     }
                 }
-                long cutoff = android.os.SystemClock.elapsedRealtime() - 20000;
-                flows.entrySet().removeIf(entry -> {
-                    if (entry.getValue().lastUsed >= cutoff && entry.getKey().association().open) return false;
-                    closeChannel(entry.getValue().channel); return true;
-                });
+                // The authenticated SOCKS control connection owns each mapping.
+                // Its closure, a network change, or VPN shutdown releases flows.
             }
-        } catch (Exception error) { if (active) { AppState.log("代理", "UDP 转发停止，已停止本次 VPN 以恢复网络"); vpn.stopSelf(); } }
+        } catch (Exception error) { if (active) { AppState.log("代理", "UDP 转发停止，正在停止本次 VPN 以恢复网络"); stopCapture.run(); } }
         finally {
             java.util.Arrays.fill(bytes, (byte)0);
             for (SelectionKey key : selector.keys()) closeChannel(key.channel());

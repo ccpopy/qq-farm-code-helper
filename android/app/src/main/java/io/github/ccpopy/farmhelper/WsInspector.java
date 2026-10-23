@@ -17,6 +17,9 @@ public final class WsInspector {
     private int fragmentType;
     public String ownGid = "";
     public boolean friendsObserved;
+    public boolean friendsComplete;
+    private long revision;
+    public long revision() { return revision; }
     private final LinkedHashSet<String> gids = new LinkedHashSet<>();
     public boolean valid() { return valid; }
     public List<String> gids() { List<String> result = new ArrayList<>(gids); result.remove(ownGid); return result; }
@@ -85,19 +88,25 @@ public final class WsInspector {
                 else m.skip();
             }
             if (type != 2 || error != 0) return;
-            if (service.equals("gamepb.userpb.UserService") && method.equals("Login")) {
+            // Current QQ clients use PlayerLogin; both replies carry BasicInfo in field 1.
+            if (service.equals("gamepb.userpb.UserService") && (method.equals("Login") || method.equals("PlayerLogin"))) {
                 Proto login = new Proto(body);
                 while (login.next()) {
-                    if (login.field == 1 && login.wire == 2) { String own = firstGid(login.bytes()); if (!own.isEmpty()) ownGid = own; }
+                    if (login.field == 1 && login.wire == 2) { String own = firstGid(login.bytes()); if (!own.isEmpty()) { ownGid = own; revision++; } }
                     else login.skip();
                 }
-            } else if (service.equals("gamepb.friendpb.FriendService") && (method.equals("SyncAll") || method.equals("GetGameFriends"))) {
+            } else if (service.equals("gamepb.friendpb.FriendService") && (method.equals("GetAll") || method.equals("SyncAll") || method.equals("GetGameFriends"))) {
                 Proto friends = new Proto(body); LinkedHashSet<String> found = new LinkedHashSet<>();
                 while (friends.next()) {
-                    if (friends.field == 1 && friends.wire == 2) { String gid = firstGid(friends.bytes()); if (!gid.isEmpty() && found.size() < 500) found.add(gid); }
+                    if (friends.field == 1 && friends.wire == 2) { String gid = firstGid(friends.bytes()); if (!gid.isEmpty()) found.add(gid); }
                     else friends.skip();
                 }
-                friendsObserved = true; gids.clear(); gids.addAll(found);
+                // GetAll/SyncAll are snapshots; GetGameFriends returns only a batch.
+                // Only GameFriend.gid (field 1, varint) is an ID. open_id and
+                // authorized_status are different fields and must not become GIDs.
+                boolean complete = method.equals("GetAll") || method.equals("SyncAll");
+                if (complete) { gids.clear(); friendsComplete = true; }
+                friendsObserved = true; gids.addAll(found); revision++;
             }
         } catch (IllegalArgumentException ignored) { /* Malformed protobuf is not a successful capture. */ }
     }

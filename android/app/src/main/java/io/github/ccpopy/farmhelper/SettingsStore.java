@@ -23,23 +23,46 @@ public final class SettingsStore {
     public String connectionId() { return prefs.getString("connectionId", ""); }
     public boolean hasToken() { return !prefs.getString("tokenCipher", "").isEmpty(); }
     public boolean allowHttp() { return prefs.getBoolean("allowHttp", false); }
-    public boolean friendCapture() { return prefs.getBoolean("friendCapture", true); }
+    public boolean friendCapture() { return prefs.getBoolean(friendCaptureKey(), capturePlatform() == CapturePlatform.QQ); }
+    private String friendCaptureKey() { return capturePlatform() == CapturePlatform.WECHAT ? "wechatFriendCapture" : "friendCapture"; }
+    public CapturePlatform capturePlatform() {
+        try { return CapturePlatform.fromId(prefs.getString("capturePlatform", "qq")); }
+        catch (IllegalArgumentException unsupported) { return CapturePlatform.QQ; }
+    }
+    public void capturePlatform(CapturePlatform platform) {
+        if (platform == capturePlatform()) return;
+        prefs.edit().putString("capturePlatform", platform.id)
+                .remove("targetId").remove("targetName").remove("targetGid").remove("targetPlatform").apply();
+    }
     public boolean passthrough() { return prefs.getBoolean("passthrough", false); }
     public void passthrough(boolean enabled) { prefs.edit().putBoolean("passthrough", enabled).apply(); }
+    public void friendCapture(boolean enabled) { prefs.edit().putBoolean(friendCaptureKey(), enabled).apply(); }
+    /** Whether a finished capture opens the account-matching flow by itself. Pushing still needs confirmation. */
+    public boolean autoPush() { return prefs.getBoolean("autoPush", true); }
+    public void autoPush(boolean enabled) { prefs.edit().putBoolean("autoPush", enabled).apply(); }
+    public boolean pushCode() { return prefs.getBoolean("pushCode", true); }
+    public void pushCode(boolean enabled) { prefs.edit().putBoolean("pushCode", enabled).apply(); }
+    public boolean pushFriends() { return prefs.getBoolean("pushFriends", true); }
+    public void pushFriends(boolean enabled) { prefs.edit().putBoolean("pushFriends", enabled).apply(); }
+    public void accelerated(boolean enabled) { prefs.edit().putBoolean("accelerated", enabled).apply(); }
+    public void mirror(String base) { prefs.edit().putString("mirror", base).apply(); }
+    public void pollSeconds(int seconds) { prefs.edit().putInt("pollSeconds", Math.max(1, seconds)).apply(); }
     public boolean accelerated() { return prefs.getBoolean("accelerated", true); }
     public String mirror() { return prefs.getString("mirror", "https://ghfast.top"); }
     public String targetId() { return prefs.getString("targetId", ""); }
     public String targetName() { return prefs.getString("targetName", "未选择账号"); }
     public String targetGid() { return prefs.getString("targetGid", ""); }
-    public int pollSeconds() { return Math.max(30, Math.min(900, prefs.getInt("pollSeconds", 60))); }
+    public String targetPlatform() { return prefs.getString("targetPlatform", "qq"); }
+    public int pollSeconds() { return Math.max(1, prefs.getInt("pollSeconds", 60)); }
     public Set<String> monitoredIds() { return new HashSet<>(prefs.getStringSet("monitoredIds", java.util.Collections.emptySet())); }
     public void monitor(Set<String> ids) { prefs.edit().putStringSet("monitoredIds", new HashSet<>(ids)).apply(); }
     public void target(ApiClient.Account account) {
-        prefs.edit().putString("targetId", account.id).putString("targetName", account.name).putString("targetGid", account.gid).apply();
+        prefs.edit().putString("targetId", account.id).putString("targetName", account.name).putString("targetGid", account.gid)
+                .putString("targetPlatform", account.platform).apply();
     }
     public void options(boolean friends, boolean accelerated, String mirror, int seconds) {
-        prefs.edit().putBoolean("friendCapture", friends).putBoolean("accelerated", accelerated)
-                .putString("mirror", mirror).putInt("pollSeconds", Math.max(30, Math.min(900, seconds))).apply();
+        prefs.edit().putBoolean(friendCaptureKey(), friends).putBoolean("accelerated", accelerated)
+                .putString("mirror", mirror).putInt("pollSeconds", Math.max(1, seconds)).apply();
     }
     public synchronized String token() throws Exception {
         String encoded = prefs.getString("tokenCipher", "");
@@ -71,13 +94,13 @@ public final class SettingsStore {
         SharedPreferences.Editor edit = prefs.edit().putString("server", base).putBoolean("allowHttp", http)
                 .putString("tokenCipher", Base64.encodeToString(data, Base64.NO_WRAP));
         if (changed) edit.putString("connectionId", java.util.UUID.randomUUID().toString())
-                .remove("targetId").remove("targetName").remove("targetGid").remove("monitoredIds");
+                .remove("targetId").remove("targetName").remove("targetGid").remove("targetPlatform").remove("monitoredIds");
         if (!edit.commit()) throw new IllegalStateException("保存设置失败");
         return changed;
     }
     public synchronized void forgetServer() {
         prefs.edit().remove("server").remove("tokenCipher").remove("allowHttp").remove("connectionId")
-                .remove("targetId").remove("targetName").remove("targetGid").remove("monitoredIds").apply();
+                .remove("targetId").remove("targetName").remove("targetGid").remove("targetPlatform").remove("monitoredIds").apply();
     }
     private SecretKey key() throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore");

@@ -58,21 +58,22 @@ public final class UrlPolicy {
         return value;
     }
     private static String decode(String value) {
-        try { return URLDecoder.decode(value, "UTF-8"); }
+        // URL query values are percent encoded; a literal '+' in a login Code
+        // is not an HTML form space (same semantics as decodeURIComponent).
+        try { return URLDecoder.decode(value.replace("+", "%2B"), "UTF-8"); }
         catch (Exception e) { throw new IllegalArgumentException("参数编码不正确"); }
     }
     public static List<String> gids(String input, String ownGid) {
         LinkedHashSet<String> result = new LinkedHashSet<>();
         for (String part : input.split("[,，;；\\s]+")) {
             if (part.isEmpty()) continue;
-            if (!part.matches("[1-9][0-9]{0,15}")) throw new IllegalArgumentException("GID 必须是正整数，每次最多 500 个");
+            if (!part.matches("[1-9][0-9]{0,15}")) throw new IllegalArgumentException("GID 必须是正整数");
             long n;
             try { n = Long.parseLong(part); }
             catch (NumberFormatException e) { throw new IllegalArgumentException("GID 超出范围"); }
             if (n > 9_007_199_254_740_991L) throw new IllegalArgumentException("GID 超出服务端安全整数范围");
             String normalized = Long.toString(n);
             if (!normalized.equals(ownGid)) result.add(normalized);
-            if (result.size() > 500) throw new IllegalArgumentException("每次最多同步 500 个好友 GID");
         }
         return new ArrayList<>(result);
     }

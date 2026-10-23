@@ -3,6 +3,7 @@
 /local.properties
 /**/build/
 /app/libs/*.aar
+/app/libs/*.aar.json
 *.jks
 *.keystore
 
@@ -11,6 +12,8 @@
 /app/src/androidTest/
 /TESTING.md
 /qa/
+/screen*.png
+/screenshots/
 *.apk
 *.apks
 *.aab

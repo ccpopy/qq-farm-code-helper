@@ -16,33 +16,30 @@ import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.Semaphore;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
-/** Full per-QQ forwarding. Passthrough mode never decrypts; capture mode only decrypts the farm SNI. */
+/** Per-app forwarding. Passthrough mode never decrypts; capture mode only decrypts the farm SNI. */
 public final class LocalSocksProxy implements AutoCloseable {
     private final VpnService vpn;
     private final java.util.function.Supplier<android.net.Network> network;
-    private final SSLContext tls;
+    private final CertificateManager certificates;
     private final String password;
     private final boolean captureFriends;
     private final boolean passthrough;
-    private final Consumer<AppState.Capture> result;
+    private final BiConsumer<AppState.Capture, Boolean> result;
     private final ServerSocket listener;
     private final Set<Socket> sockets = ConcurrentHashMap.newKeySet();
-    private final java.util.concurrent.ThreadPoolExecutor workers = new java.util.concurrent.ThreadPoolExecutor(0, 160, 20,
-            TimeUnit.SECONDS, new java.util.concurrent.SynchronousQueue<>());
-    private final ScheduledExecutorService deadlines = Executors.newSingleThreadScheduledExecutor();
+    // Relays block while a connection is idle. A fixed pool or admission count
+    // would reject unrelated QQ connections merely because others remain open.
+    private final ExecutorService workers = Executors.newCachedThreadPool();
     private final AtomicBoolean claimed = new AtomicBoolean();
-    private final Semaphore slots = new Semaphore(48);
     private final SocksUdpRelay udp;
     private volatile boolean active = true;
     private static final class StageFailure extends IOException {
@@ -50,12 +47,12 @@ public final class LocalSocksProxy implements AutoCloseable {
         StageFailure(String stage, Exception cause) { super(stage, cause); this.stage = stage; }
     }
 
-    public LocalSocksProxy(VpnService vpn, java.util.function.Supplier<android.net.Network> network, SSLContext tls, String password,
-                           boolean captureFriends, boolean passthrough, Consumer<AppState.Capture> result) throws IOException {
-        this.vpn = vpn; this.network = network; this.tls = tls; this.password = password;
+    public LocalSocksProxy(VpnService vpn, java.util.function.Supplier<android.net.Network> network, CertificateManager certificates, String password,
+                           boolean captureFriends, boolean passthrough, Runnable stopCapture, BiConsumer<AppState.Capture, Boolean> result) throws IOException {
+        this.vpn = vpn; this.network = network; this.certificates = certificates; this.password = password;
         this.captureFriends = captureFriends; this.passthrough = passthrough; this.result = result;
-        listener = new ServerSocket(); listener.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 16);
-        try { udp = new SocksUdpRelay(vpn, network); } catch (IOException error) { listener.close(); throw error; }
+        listener = new ServerSocket(); listener.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0));
+        try { udp = new SocksUdpRelay(vpn, network, stopCapture); } catch (IOException error) { listener.close(); throw error; }
         Thread accept = new Thread(this::accept, "farm-socks"); accept.start();
     }
     public int port() { return listener.getLocalPort(); }
@@ -64,8 +61,8 @@ public final class LocalSocksProxy implements AutoCloseable {
         while (active) try {
             Socket socket = listener.accept();
             AppState.socksAccepted++;
-            if (!slots.tryAcquire()) { socket.close(); continue; }
             sockets.add(socket);
+            if (!active) { closeSocket(socket); continue; }
             try { workers.execute(() -> {
                 try { socket.setSoTimeout(15_000); socket.setTcpNoDelay(true); handle(socket); }
                 catch (Exception e) { if (active) {
@@ -77,8 +74,8 @@ public final class LocalSocksProxy implements AutoCloseable {
                     AppState.proxyFailure = (e instanceof StageFailure ? ((StageFailure)e).stage : "socks") + "/" + kind;
                     AppState.log("代理", "连接未完成：" + AppState.proxyFailure + "；不会绕过证书校验");
                 } }
-                finally { closeSocket(socket); slots.release(); }
-            }); } catch (java.util.concurrent.RejectedExecutionException overloaded) { closeSocket(socket); slots.release(); }
+                finally { closeSocket(socket); }
+            }); } catch (java.util.concurrent.RejectedExecutionException stopped) { closeSocket(socket); }
         } catch (Exception e) { if (active) AppState.log("代理", "本地连接失败"); }
     }
     private void handle(Socket client) throws Exception {
@@ -139,11 +136,19 @@ public final class LocalSocksProxy implements AutoCloseable {
         }
         AppState.gatewayConnections++;
         AppState.gatewayTlsAttempts++;
+        client.setSoTimeout(0);
+        // Authenticate the real farm first, then reuse this same TLS connection for relay.
+        // No HTTP/login bytes are sent upstream in Code-only mode.
+        try (SSLSocket server = connectTls(upstream)) {
+        SSLContext tls;
+        try { tls = certificates.serverContext((java.security.cert.X509Certificate) server.getSession().getPeerCertificates()[0]); }
+        catch (Exception error) { throw new StageFailure("certificate_profile", error); }
+        AppState.log("证书", "已使用校验通过的上游证书生成兼容证书：Subject、DNS SAN、有效期");
         try (TlsServerBridge bridge = TlsServerBridge.open(tls, client, hello.consumed(), workers)) {
             SSLSocket decrypted = bridge.socket;
-            try { decrypted.startHandshake(); } catch (Exception error) { throw new StageFailure("client_tls", error); }
+            try { decrypted.startHandshake(); } catch (Exception error) { logHandshakeFailure(error); throw new StageFailure("client_tls", error); }
             AppState.tlsVerified = true;
-            AppState.log("证书", "QQ 目标连接的 TLS 握手已验证成功");
+            AppState.log("证书", "农场目标连接的 TLS 握手已验证成功");
             byte[] requestHeaders;
             try { requestHeaders = readHeaders(decrypted.getInputStream()); } catch (Exception error) { throw new StageFailure("client_http", error); }
             String text = new String(requestHeaders, StandardCharsets.ISO_8859_1);
@@ -157,12 +162,27 @@ public final class LocalSocksProxy implements AutoCloseable {
             if (inspect && !captureFriends) {
                 decrypted.getOutputStream().write("HTTP/1.1 451 Unavailable For Legal Reasons\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
                 decrypted.getOutputStream().flush();
-                result.accept(new AppState.Capture(code, "", Collections.emptyList(), android.os.SystemClock.elapsedRealtime(), false));
+                result.accept(new AppState.Capture(code, "", Collections.emptyList(), android.os.SystemClock.elapsedRealtime(), false), true);
                 return;
             }
-            relayTls(decrypted, upstream, requestHeaders, inspect ? code : null);
+            AppState.Capture pending = inspect ? new AppState.Capture(code, "", Collections.emptyList(), android.os.SystemClock.elapsedRealtime(), false) : null;
+            if (pending != null) result.accept(pending, false);
+            relayTls(decrypted, server, requestHeaders, pending);
+        }
         }
         } finally { closeSocket(upstream); }
+    }
+    // Diagnostic only: the exception chain carries protocol detail (TLS alert vs plain
+    // socket close) but never certificate bytes, SNI, or farm data, so it is safe to log.
+    private static void logHandshakeFailure(Throwable error) {
+        StringBuilder trace = new StringBuilder();
+        for (Throwable step = error; step != null && trace.length() < 300; step = step.getCause()) {
+            if (trace.length() > 0) trace.append(" <- ");
+            trace.append(step.getClass().getSimpleName());
+            String message = step.getMessage();
+            if (message != null && !message.isEmpty()) trace.append(':').append(message);
+        }
+        AppState.log("证书", "客户端 TLS 握手失败：" + trace);
     }
     private Socket upstream(InetAddress address, int port) throws IOException {
         Socket socket = new Socket();
@@ -178,55 +198,76 @@ public final class LocalSocksProxy implements AutoCloseable {
             selected.bindSocket(socket);
         } catch (IOException error) { socket.close(); throw new StageFailure("upstream_network", error); }
         sockets.add(socket);
+        if (!active) { closeSocket(socket); throw new IOException("VPN stopped"); }
         try { socket.connect(new InetSocketAddress(address, port), 10_000); socket.setTcpNoDelay(true); socket.setSoTimeout(25_000); return socket; }
         catch (IOException e) { closeSocket(socket); throw new StageFailure(address.getAddress().length == 16 ? "upstream_connect_ipv6" : "upstream_connect_ipv4", e); }
     }
     private void opaque(Socket client, Socket server, byte[] consumed, boolean observeTls) throws Exception {
         AppState.tcpPassthroughs++;
         try {
-            // Transparent QQ/MSF connections can be idle. The VPN's two-minute
-            // lifetime, not an arbitrary per-read timeout, bounds these relays.
+            // Keep established connections until their peers close, the network
+            // changes, or the user stops the VPN; idle reads are not failures.
             client.setSoTimeout(0); server.setSoTimeout(0);
             server.getOutputStream().write(consumed); server.getOutputStream().flush();
+            AppState.tcpBytesOut.addAndGet(consumed.length);
             TlsMetadata metadata = observeTls ? new TlsMetadata() : null;
-            workers.execute(() -> copyQuietly(client, server, metadata));
-            copy(server.getInputStream(), client.getOutputStream(), metadata == null ? null : (bytes, length) -> metadata.returned(length));
+            workers.execute(() -> copyQuietly(client, server, (bytes, length) -> {
+                AppState.tcpBytesOut.addAndGet(length);
+                if (metadata != null) metadata.feed(bytes, length);
+            }));
+            copy(server.getInputStream(), client.getOutputStream(), (bytes, length) -> {
+                AppState.tcpBytesIn.addAndGet(length);
+                if (metadata != null) metadata.returned(length);
+            });
         } finally { closeSocket(server); }
     }
-    private void relayTls(SSLSocket client, Socket raw, byte[] request, String code) throws Exception {
-        WsInspector inspector = new WsInspector(); AtomicBoolean delivered = new AtomicBoolean();
-        Runnable finish = () -> {
-            if (code == null || !active || !delivered.compareAndSet(false, true)) return;
-            synchronized (inspector) {
-                if (!inspector.friendsObserved) AppState.log("抓取", "Code 已取得，但未观察到成功的好友回包；不会伪报好友同步成功");
-                result.accept(new AppState.Capture(code, inspector.ownGid, inspector.gids(), android.os.SystemClock.elapsedRealtime(), inspector.friendsObserved));
-            }
-        };
-        try (SSLSocket server = (SSLSocket) ((SSLSocketFactory)SSLSocketFactory.getDefault()).createSocket(raw, UrlPolicy.FARM_HOST, 443, true)) {
+    private static SSLSocket connectTls(Socket raw) throws Exception {
+        SSLSocket server = null;
+        try {
+            server = (SSLSocket) ((SSLSocketFactory)SSLSocketFactory.getDefault()).createSocket(raw, UrlPolicy.FARM_HOST, 443, true);
             SSLParameters parameters = server.getSSLParameters();
             parameters.setEndpointIdentificationAlgorithm("HTTPS");
             parameters.setServerNames(Collections.singletonList(new SNIHostName(UrlPolicy.FARM_HOST)));
             server.setSSLParameters(parameters);
-            try { server.startHandshake(); } catch (Exception error) { throw new StageFailure("upstream_tls", error); }
+            server.startHandshake();
+            return server;
+        } catch (Exception error) {
+            if (server != null) try { server.close(); } catch (IOException ignored) { }
+            throw new StageFailure("upstream_tls", error);
+        }
+    }
+    private void relayTls(SSLSocket client, SSLSocket server, byte[] request, AppState.Capture pending) throws Exception {
+        WsInspector inspector = new WsInspector(); AtomicBoolean delivered = new AtomicBoolean();
+        Runnable finish = () -> {
+            if (pending == null || !active || !delivered.compareAndSet(false, true)) return;
+            synchronized (inspector) {
+                if (!inspector.friendsObserved) AppState.log("抓取", "尚未观察到成功的好友回包；不会伪报好友同步成功");
+                else if (!inspector.friendsComplete) AppState.log("抓取", "仅收到分批好友回包，已保留实际读取的 GID；尚未确认完整列表");
+                result.accept(new AppState.Capture(pending.code(), inspector.ownGid, inspector.gids(), pending.createdAt(), inspector.friendsObserved, pending.generation()), true);
+            }
+        };
+        try {
             String clean = new String(request, StandardCharsets.ISO_8859_1).replaceAll("(?im)^Sec-WebSocket-Extensions:[^\r\n]*\r\n", "");
             server.getOutputStream().write(clean.getBytes(StandardCharsets.ISO_8859_1)); server.getOutputStream().flush();
             byte[] response;
             try { response = readHeaders(server.getInputStream()); } catch (Exception error) { throw new StageFailure("upstream_http", error); }
             client.getOutputStream().write(response); client.getOutputStream().flush();
-            if (code != null) {
+            if (pending != null) {
                 if (!new String(response, StandardCharsets.ISO_8859_1).startsWith("HTTP/1.1 101 ")) { finish.run(); return; }
-                AppState.log("抓取", "Code 已取得，等待官方登录和好友回包（最多 20 秒）");
-                deadlines.schedule(finish, 20, TimeUnit.SECONDS);
+                AppState.log("抓取", "已连接农场，等待官方登录和好友回包；可随时手动停止并保留已取得的结果");
             }
-            client.setSoTimeout(25_000); server.setSoTimeout(25_000);
+            client.setSoTimeout(0); server.setSoTimeout(0);
             workers.execute(() -> copyQuietly(client, server));
-            copy(server.getInputStream(), client.getOutputStream(), code == null ? null : (bytes, length) -> {
+            copy(server.getInputStream(), client.getOutputStream(), pending == null ? null : (bytes, length) -> {
                 synchronized (inspector) {
+                    long revision = inspector.revision();
                     inspector.feed(bytes, 0, length);
-                    if (inspector.friendsObserved && !inspector.ownGid.isEmpty()) finish.run();
+                    if (inspector.friendsComplete && !inspector.ownGid.isEmpty()) finish.run();
+                    else if (inspector.revision() != revision && !delivered.get())
+                        result.accept(new AppState.Capture(pending.code(), inspector.ownGid, inspector.gids(), pending.createdAt(), inspector.friendsObserved, pending.generation()), false);
                 }
             });
-        } finally { finish.run(); closeSocket(raw); }
+        } finally { finish.run(); }
     }
     private interface Observer { void accept(byte[] bytes, int length); }
     private void copy(InputStream input, OutputStream output, Observer observer) throws IOException {
@@ -239,8 +280,8 @@ public final class LocalSocksProxy implements AutoCloseable {
     private void copyQuietly(Socket source, Socket destination) {
         copyQuietly(source, destination, null);
     }
-    private void copyQuietly(Socket source, Socket destination, TlsMetadata metadata) {
-        try { copy(source.getInputStream(), destination.getOutputStream(), metadata == null ? null : metadata::feed); }
+    private void copyQuietly(Socket source, Socket destination, Observer observer) {
+        try { copy(source.getInputStream(), destination.getOutputStream(), observer); }
         catch (IOException ignored) { }
         finally { try { destination.shutdownOutput(); } catch (IOException ignored) { } }
     }
@@ -271,6 +312,6 @@ public final class LocalSocksProxy implements AutoCloseable {
         try { listener.close(); } catch (IOException ignored) { }
         for (Socket socket : new ArrayList<>(sockets)) closeSocket(socket);
         udp.close();
-        deadlines.shutdownNow(); workers.shutdownNow();
+        workers.shutdownNow();
     }
 }

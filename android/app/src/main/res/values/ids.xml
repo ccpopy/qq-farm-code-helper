@@ -1,4 +1,8 @@
 <resources>
+    <item name="wx_login" type="id" />
+    <item name="wx_login_status" type="id" />
+    <item name="capture_platform" type="id" />
+    <item name="capture_toggle" type="id" />
     <item name="passthrough_mode" type="id" />
     <item name="nav_capture" type="id" />
     <item name="nav_accounts" type="id" />

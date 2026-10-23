@@ -24,7 +24,7 @@ public final class TlsServerBridge implements Closeable {
         try (SSLServerSocket listener = (SSLServerSocket) context.getServerSocketFactory().createServerSocket(0, 1, loopback)) {
             listener.setSoTimeout(3000);
             replay.connect(new InetSocketAddress(loopback, listener.getLocalPort()), 3000);
-            replay.setTcpNoDelay(true); replay.setSoTimeout(25_000);
+            replay.setTcpNoDelay(true); replay.setSoTimeout(0);
             accepted = (SSLSocket) listener.accept();
             // Do not accept a connection from another local app that raced our ephemeral listener.
             if (!accepted.getInetAddress().equals(loopback) || accepted.getPort() != replay.getLocalPort())

@@ -26,11 +26,17 @@ public final class AppState {
     public static volatile long tunnelTxPackets, tunnelRxPackets;
     public static volatile String proxyFailure = "none";
     public static volatile int tcpPassthroughs, udpAssociations, udpPacketsOut, udpPacketsIn, udpDropped;
+    static final java.util.concurrent.atomic.AtomicLong tcpBytesOut = new java.util.concurrent.atomic.AtomicLong();
+    static final java.util.concurrent.atomic.AtomicLong tcpBytesIn = new java.util.concurrent.atomic.AtomicLong();
     public static volatile boolean capturePassthrough;
+    public static volatile CapturePlatform capturePlatform = CapturePlatform.QQ;
     public static volatile boolean vpnIpv6;
     private static final java.util.LinkedHashMap<String, Integer> tlsHosts = new java.util.LinkedHashMap<>();
     private static final java.util.HashSet<String> tlsReplies = new java.util.HashSet<>();
-    static synchronized void resetConnections() { tlsHosts.clear(); tlsReplies.clear(); tcpPassthroughs = udpAssociations = udpPacketsOut = udpPacketsIn = udpDropped = 0; }
+    static synchronized void resetConnections() {
+        tlsHosts.clear(); tlsReplies.clear(); tcpPassthroughs = udpAssociations = udpPacketsOut = udpPacketsIn = udpDropped = 0;
+        tcpBytesOut.set(0); tcpBytesIn.set(0);
+    }
     static synchronized void observeTlsReply(String host) { if (tlsHosts.containsKey(host)) { tlsReplies.add(host); changed(); } }
     static synchronized boolean farmTrafficReplied() { return tlsReplies.contains(UrlPolicy.FARM_HOST); }
     static synchronized void observeTls(String host) {
@@ -40,7 +46,13 @@ public final class AppState {
         tlsHosts.put(host, tlsHosts.getOrDefault(host, 0) + 1); changed();
     }
     public static synchronized String connectionText() {
-        StringBuilder text = new StringBuilder("TCP 透传：").append(tcpPassthroughs).append(" · UDP 发 / 收：").append(udpPacketsOut).append(" / ").append(udpPacketsIn);
+        StringBuilder text = new StringBuilder("本次接管：").append(capturePlatform.label)
+                .append("\nTCP 透传：").append(tcpPassthroughs).append(" · UDP 发 / 收：").append(udpPacketsOut).append(" / ").append(udpPacketsIn);
+        text.append("\nTCP 字节发 / 收：").append(tcpBytesOut.get()).append(" / ").append(tcpBytesIn.get());
+        text.append("\nTUN 发 / 收：").append(tunnelTxPackets).append(" / ").append(tunnelRxPackets)
+                .append(" · SOCKS 接入 / 认证：").append(socksAccepted).append(" / ").append(socksAuthenticated)
+                .append("\nSOCKS 拒绝：").append(socksRejected).append(" · UDP 丢弃：").append(udpDropped)
+                .append(" · 最近失败阶段：").append(proxyFailure);
         if (tlsHosts.isEmpty()) return text.append("\n尚未观察到新的 TLS 握手；已建立的连接不会补出登录请求。").toString();
         text.append("\nTLS 主机（仅本次内存；不含路径、参数和内容）：");
         tlsHosts.forEach((host, count) -> text.append('\n').append(host).append(" × ").append(count).append(tlsReplies.contains(host) ? " · 有上游响应" : " · 尚未观察响应"));
@@ -56,33 +68,53 @@ public final class AppState {
     private AppState() {}
     static void init(Context context) {
         settings = new SettingsStore(context);
+        capturePlatform = settings.capturePlatform();
         log("隐私", "不读取聊天、联系人或存储文件；Code 仅驻留内存，5 分钟后清除");
     }
-    public record Capture(String code, String ownGid, List<String> gids, long createdAt, boolean friendsObserved, long generation) {
+    public record Capture(String code, String ownGid, List<String> gids, long createdAt, boolean friendsObserved, long generation, CapturePlatform platform) {
         private static final java.util.concurrent.atomic.AtomicLong NEXT = new java.util.concurrent.atomic.AtomicLong();
         public Capture(String code, String ownGid, List<String> gids, long createdAt, boolean friendsObserved) {
             this(code, ownGid, gids, createdAt, friendsObserved, NEXT.incrementAndGet());
         }
-        public Capture { gids = java.util.Collections.unmodifiableList(new ArrayList<>(gids)); }
+        public Capture(String code, String ownGid, List<String> gids, long createdAt, boolean friendsObserved, long generation) {
+            this(code, ownGid, gids, createdAt, friendsObserved, generation, CapturePlatform.QQ);
+        }
+        public Capture { java.util.Objects.requireNonNull(platform); gids = java.util.Collections.unmodifiableList(new ArrayList<>(gids)); }
+        Capture forPlatform(CapturePlatform source) {
+            return new Capture(code, ownGid, gids, createdAt, friendsObserved, generation, source);
+        }
+        Capture withoutCode() { return new Capture("", ownGid, gids, createdAt, friendsObserved, generation, platform); }
     }
     public static synchronized Capture capture() {
         if (capture != null && SystemClock.elapsedRealtime() - capture.createdAt > 300_000) capture = null;
         return capture;
     }
-    public static synchronized void captured(String code, String own, List<String> gids, boolean observed) {
-        capture = new Capture(code, own == null ? "" : own, gids, SystemClock.elapsedRealtime(), observed);
-        MAIN.postDelayed(() -> { capture(); changed(); }, 300_100);
+    public static synchronized void captured(String code, String own, List<String> gids, boolean observed, CapturePlatform platform) {
+        captured(new Capture(code, own == null ? "" : own, gids, SystemClock.elapsedRealtime(), observed).forPlatform(platform));
+    }
+    static synchronized void captured(Capture value) {
+        capture = value;
+        MAIN.postDelayed(() -> { capture(); changed(); }, Math.max(0, 300_100 - (SystemClock.elapsedRealtime() - value.createdAt)));
         changed();
+    }
+    static synchronized boolean completeCapture(Capture value) {
+        Capture previous = capture();
+        // A delayed friend reply must not restore an expired, cleared, replaced,
+        // or already submitted Code, nor restart its five-minute lifetime.
+        if (previous == null || previous.generation != value.generation || previous.platform != value.platform) return false;
+        capture = new Capture(previous.code.isEmpty() ? "" : value.code, value.ownGid, value.gids,
+                previous.createdAt, value.friendsObserved, previous.generation, previous.platform);
+        changed(); return true;
     }
     public static synchronized void clearCapture() { capture = null; changed(); }
     public static synchronized void consumeCode(Capture original) {
         if (capture != null && capture.generation == original.generation)
-            capture = new Capture("", capture.ownGid, capture.gids, capture.createdAt, capture.friendsObserved, capture.generation);
+            capture = new Capture("", capture.ownGid, capture.gids, capture.createdAt, capture.friendsObserved, capture.generation, capture.platform);
         changed();
     }
     public static synchronized void consumeFriends(Capture original) {
         if (capture != null && capture.generation == original.generation)
-            capture = new Capture(capture.code, capture.ownGid, java.util.Collections.emptyList(), capture.createdAt, false, capture.generation);
+            capture = new Capture(capture.code, capture.ownGid, java.util.Collections.emptyList(), capture.createdAt, false, capture.generation, capture.platform);
         changed();
     }
     public static synchronized void log(String tag, String text) {
