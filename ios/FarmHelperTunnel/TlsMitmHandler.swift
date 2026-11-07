@@ -73,7 +73,7 @@ final class TlsMitmHandler: @unchecked Sendable {
                 inspector.feed([UInt8](data))
                 guard inspector.revision != lastRevision else { return }
                 lastRevision = inspector.revision
-                coordinator.merge(
+                self.coordinator.merge(
                     generation: generation,
                     ownGid: inspector.ownGid,
                     gids: inspector.pendingGids,
@@ -107,7 +107,7 @@ final class TlsMitmHandler: @unchecked Sendable {
                 },
                 onFinish: {
                     if inspection.owned {
-                        coordinator.finish(generation: generation)
+                        self.coordinator.finish(generation: generation)
                     }
                     _ = session
                 }

@@ -288,7 +288,7 @@ final class CertificateAuthority: @unchecked Sendable {
         if let group = AppGroup.keychainAccessGroup { query[kSecAttrAccessGroup as String] = group }
         var item: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess else { return nil }
-        return item as? SecKey
+        return item as! SecKey
     }
 
     private func copyIdentity(label: String) -> SecIdentity? {

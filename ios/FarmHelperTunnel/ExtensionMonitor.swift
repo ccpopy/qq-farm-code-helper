@@ -71,7 +71,7 @@ final class ExtensionMonitor: @unchecked Sendable {
             workers.removeValue(forKey: serverId)
             lock.unlock()
         }
-        var transitions = AccountTransitions()
+        let transitions = AccountTransitions()
         var relayUnavailable = false
         var cursor = ""
         var delivered: [String: String] = [:]

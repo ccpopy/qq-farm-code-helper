@@ -41,8 +41,8 @@ extension NWConnection {
                     gate.fail(TunnelError.closed)
                 case .waiting(let error):
                     // TLS verification failures land here and never become ready.
-                    if let tlsError = error as? NWError, case .tls = tlsError {
-                        gate.fail(TunnelError.tls(tlsError.localizedDescription))
+                    if case .tls = error {
+                        gate.fail(TunnelError.tls(error.localizedDescription))
                     }
                 default:
                     break
@@ -70,7 +70,7 @@ extension NWConnection {
     }
 
     func sendAsync(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             send(content: data, contentContext: .defaultMessage, isComplete: false, completion: .contentProcessed { error in
                 if let error {
                     continuation.resume(throwing: error)

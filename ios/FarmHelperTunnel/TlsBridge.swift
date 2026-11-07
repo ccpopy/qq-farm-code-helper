@@ -23,7 +23,7 @@ enum TLSClient {
         var leaf: Data?
         sec_protocol_metadata_access_peer_certificate_chain(metadata.securityProtocolMetadata) { certificate in
             guard leaf == nil else { return }
-            guard let reference = sec_certificate_copy_ref(certificate)?.takeRetainedValue() else { return }
+            let reference = sec_certificate_copy_ref(certificate).takeRetainedValue()
             leaf = SecCertificateCopyData(reference) as Data
         }
         guard let leaf else {
