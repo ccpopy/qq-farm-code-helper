@@ -5,6 +5,8 @@
 并阅读 [Android 使用与构建说明](android/README.md) 和 [更新日志](android/CHANGELOG.md)。
 Android 标签为 `android-vX.Y.Z`，与下述 Windows 桌面版本独立发布。
 
+同一仓库的 `ios/` 目录提供 iOS 版本，标签为 `ios-vX.Y.Z`；构建、GitHub Actions 编译与发布说明见 [iOS 说明](ios/README.md) 和 [iOS 更新日志](ios/CHANGELOG.md)。
+
 一个面向 Windows 桌面客户端的小型 Rust/Tauri 应用。它会在本机临时启用定向代理，仅处理目标农场网关：透明转发同一次 `/prod/ws` 官方登录，在内存中保留 `code` 并读取官方 `SyncAll` 响应中的好友 GID，随后一起同步到远程服务器。
 
 获取后可以：

@@ -1,0 +1,309 @@
+name: Build and release iOS
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'ios-v*'
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios.yml'
+  pull_request:
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version X.Y.Z (empty = read ios/FarmHelper/Info.plist)'
+        required: false
+        type: string
+      release:
+        description: 'Create or update a GitHub Release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build iOS packages
+    runs-on: macos-14
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+      IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+      IOS_SIGNING_IDENTITY: ${{ secrets.IOS_SIGNING_IDENTITY }}
+      IOS_APP_PROFILE_BASE64: ${{ secrets.IOS_APP_PROFILE_BASE64 }}
+      IOS_TUNNEL_PROFILE_BASE64: ${{ secrets.IOS_TUNNEL_PROFILE_BASE64 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/ios-v* ]]; then
+            version="${RELEASE_TAG#ios-v}"
+          elif [[ -n "${INPUT_VERSION:-}" ]]; then
+            version="$INPUT_VERSION"
+          else
+            version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' ios/FarmHelper/Info.plist)
+          fi
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Invalid iOS version '$version'; expected X.Y.Z"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "iOS version: $version (build $GITHUB_RUN_NUMBER)"
+
+      - name: Cache hev-socks5-tunnel
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/.build
+            ios/Vendor/HevSocks5Tunnel.xcframework
+          key: hev-2.19.1-${{ runner.os }}-${{ hashFiles('ios/scripts/build-hev.sh') }}
+
+      - name: Install XcodeGen
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          set -euo pipefail
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Build native tunnel and generate project
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          bash scripts/build-hev.sh
+          xcodegen generate
+
+      - name: Build unsigned archive
+        env:
+          ARCHIVE: ${{ runner.temp }}/FarmHelper.xcarchive
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          bash ios/scripts/build-archive.sh "$ARCHIVE" "$VERSION" "$GITHUB_RUN_NUMBER"
+
+      - name: Package unsigned IPA
+        env:
+          ARCHIVE: ${{ runner.temp }}/FarmHelper.xcarchive
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p outputs/ios/release
+          bash ios/scripts/package-ipa.sh \
+            "$ARCHIVE/Products/Applications/FarmHelper.app" \
+            "outputs/ios/release/FarmHelper-ios-v${VERSION}-unsigned.ipa"
+
+      - name: Check signing secrets
+        id: signing
+        run: |
+          set -euo pipefail
+          any=0
+          [ -n "${IOS_CERTIFICATE_BASE64:-}" ] && any=1
+          [ -n "${IOS_APP_PROFILE_BASE64:-}" ] && any=1
+          [ -n "${IOS_TUNNEL_PROFILE_BASE64:-}" ] && any=1
+          if [ "$any" -eq 0 ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No iOS signing secrets configured; this run produces an unsigned IPA only."
+            exit 0
+          fi
+          missing=0
+          [ -n "${IOS_CERTIFICATE_BASE64:-}" ] || { echo "::error::Missing signing secret IOS_CERTIFICATE_BASE64"; missing=1; }
+          [ -n "${IOS_APP_PROFILE_BASE64:-}" ] || { echo "::error::Missing signing secret IOS_APP_PROFILE_BASE64"; missing=1; }
+          [ -n "${IOS_TUNNEL_PROFILE_BASE64:-}" ] || { echo "::error::Missing signing secret IOS_TUNNEL_PROFILE_BASE64"; missing=1; }
+          [ "$missing" -eq 0 ] || exit 1
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install signing certificate
+        if: steps.signing.outputs.signed == 'true' && (startsWith(github.ref, 'refs/tags/ios-v') || github.event_name == 'workflow_dispatch')
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PATH=$KEYCHAIN" >> "$GITHUB_ENV"
+          printf '%s' "$CERTIFICATE_BASE64" | /usr/bin/base64 -D > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" \
+            -P "${CERTIFICATE_PASSWORD:-}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # shellcheck disable=SC2046
+          # Intentionally pass each existing keychain as a separate argument.
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | tr -d '"')
+          security default-keychain -s "$KEYCHAIN"
+          if [ -n "${IOS_SIGNING_IDENTITY:-}" ]; then
+            echo "SIGN_IDENTITY=$IOS_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          else
+            identity=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+              | sed -n 's/.*"\(.*\)"/\1/p' | head -n 1)
+            [ -n "$identity" ] || { echo "::error::No codesigning identity in the imported certificate"; exit 1; }
+            echo "SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          fi
+          rm -f "$RUNNER_TEMP/certificate.p12"
+
+      - name: Decode provisioning profiles
+        if: steps.signing.outputs.signed == 'true' && (startsWith(github.ref, 'refs/tags/ios-v') || github.event_name == 'workflow_dispatch')
+        run: |
+          set -euo pipefail
+          printf '%s' "$IOS_APP_PROFILE_BASE64" | /usr/bin/base64 -D > "$RUNNER_TEMP/app.mobileprovision"
+          printf '%s' "$IOS_TUNNEL_PROFILE_BASE64" | /usr/bin/base64 -D > "$RUNNER_TEMP/tunnel.mobileprovision"
+
+      - name: Sign and package IPA
+        if: steps.signing.outputs.signed == 'true' && (startsWith(github.ref, 'refs/tags/ios-v') || github.event_name == 'workflow_dispatch')
+        env:
+          ARCHIVE: ${{ runner.temp }}/FarmHelper.xcarchive
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          bash ios/scripts/sign-ipa.sh \
+            "$ARCHIVE/Products/Applications/FarmHelper.app" \
+            "outputs/ios/release/FarmHelper-ios-v${VERSION}-signed.ipa" \
+            "$RUNNER_TEMP/app.mobileprovision" \
+            "$RUNNER_TEMP/tunnel.mobileprovision"
+
+      - name: Package dSYMs
+        env:
+          ARCHIVE: ${{ runner.temp }}/FarmHelper.xcarchive
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -d "$ARCHIVE/dSYMs" ]; then
+            /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
+              "$ARCHIVE/dSYMs" "outputs/ios/release/FarmHelper-ios-v${VERSION}-dSYMs.zip"
+          else
+            echo "::warning::No dSYMs directory in the archive"
+          fi
+
+      - name: Write checksums
+        run: |
+          set -euo pipefail
+          cd outputs/ios/release
+          rm -f SHA256SUMS.txt
+          find . -maxdepth 1 -type f \( -name '*.ipa' -o -name '*.zip' \) -print \
+            | sort | sed 's|^\./||' | xargs shasum -a 256 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-packages
+          path: outputs/ios/release/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove temporary keychain
+        if: always() && steps.signing.outputs.signed == 'true'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain" 2>/dev/null || true
+
+  release:
+    name: Publish iOS release
+    needs: build
+    if: needs.build.result == 'success' && (startsWith(github.ref, 'refs/tags/ios-v') || (github.event_name == 'workflow_dispatch' && inputs.release))
+    runs-on: macos-14
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-packages
+          path: outputs/ios/release
+
+      - name: Resolve release metadata
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p outputs/ios
+          tag="ios-v${VERSION}"
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          notes="outputs/ios/release-notes.md"
+          if ! bash ios/scripts/changelog-section.sh "$tag" ios/CHANGELOG.md > "$notes" || [ ! -s "$notes" ]; then
+            printf '## 农场助手 iOS v%s\n' "$VERSION" > "$notes"
+          fi
+          {
+            echo
+            echo "## 构建产物"
+            echo
+            echo "- \`FarmHelper-${tag}-unsigned.ipa\`：未签名，需要用自己的证书和描述文件重签后安装。"
+            if compgen -G "outputs/ios/release/*-signed.ipa" >/dev/null; then
+              echo "- \`FarmHelper-${tag}-signed.ipa\`：已签名；能否安装取决于描述文件类型与已登记设备。"
+            else
+              echo "- 本次未配置 iOS 签名密钥，因此没有 signed IPA。"
+            fi
+            echo "- \`FarmHelper-${tag}-dSYMs.zip\`：调试符号。"
+            echo "- \`SHA256SUMS.txt\`：SHA-256 校验值。"
+            echo
+            echo "签名 IPA 受 Apple 描述文件限制；公开分发需要 TestFlight 或 App Store。"
+          } >> "$notes"
+          cat "$notes"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(outputs/ios/release/*)
+          [ ${#assets[@]} -gt 0 ] || { echo "::error::No release assets"; exit 1; }
+          existing=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null || true)
+          if [ -n "$existing" ]; then
+            if [ "$existing" != "true" ]; then
+              echo "::error::Release $RELEASE_TAG is already published; use a new version instead of replacing its assets."
+              exit 1
+            fi
+            gh release edit "$RELEASE_TAG" --title "农场助手 iOS v${VERSION}" \
+              --notes-file outputs/ios/release-notes.md
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+              gh release create "$RELEASE_TAG" "${assets[@]}" --draft --target "$GITHUB_SHA" \
+                --title "农场助手 iOS v${VERSION}" \
+                --notes-file outputs/ios/release-notes.md
+            else
+              gh release create "$RELEASE_TAG" "${assets[@]}" --draft \
+                --title "农场助手 iOS v${VERSION}" \
+                --notes-file outputs/ios/release-notes.md
+            fi
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest=false

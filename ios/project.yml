@@ -1,0 +1,79 @@
+name: FarmHelper
+options:
+  bundleIdPrefix: io.github.ccpopy
+  projectFormat: xcode15_0
+  xcodeVersion: "15.0"
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+    CLANG_ENABLE_MODULES: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    SWIFT_STRICT_CONCURRENCY: minimal
+
+targets:
+  FarmHelper:
+    type: application
+    platform: iOS
+    sources:
+      - path: FarmHelper
+        excludes:
+          - "Info.plist"
+          - "Resources/**"
+      - path: Shared
+    resources:
+      - path: FarmHelper/Resources
+      - path: Config/PrivacyInfo.xcprivacy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.ccpopy.farmhelper
+        PRODUCT_NAME: FarmHelper
+        INFOPLIST_FILE: FarmHelper/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Config/FarmHelper.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+    dependencies:
+      - target: FarmHelperTunnel
+        embed: true
+
+  FarmHelperTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: FarmHelperTunnel
+        excludes:
+          - "Info.plist"
+      - path: Shared
+    resources:
+      - path: Config/PrivacyInfo.xcprivacy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.ccpopy.farmhelper.tunnel
+        PRODUCT_NAME: FarmHelperTunnel
+        INFOPLIST_FILE: FarmHelperTunnel/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Config/FarmHelperTunnel.entitlements
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+    dependencies:
+      - framework: Vendor/HevSocks5Tunnel.xcframework
+        embed: false
+
+schemes:
+  FarmHelper:
+    build:
+      targets:
+        FarmHelper: all
+    run:
+      config: Debug
+    archive:
+      config: Release
