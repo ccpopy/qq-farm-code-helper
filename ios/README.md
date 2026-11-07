@@ -73,7 +73,7 @@ Release 归档需要真实签名；`xcodebuild -exportArchive` 需要你自备 `
 
 工作流文件：`.github/workflows/ios.yml`。
 
-- **推送 / PR**（改动 `ios/**` 或该工作流）：在 `macos-14` 上构建未签名 Release archive，产出未签名 IPA、dSYM 和 SHA-256 校验值，作为 Actions artifact 保留 30 天。
+- **推送 / PR**（改动 `ios/**` 或该工作流）：在 `macos-15` 上构建未签名 Release archive，产出未签名 IPA、dSYM 和 SHA-256 校验值，作为 Actions artifact 保留 30 天。
 - **推送 `ios-vX.Y.Z` 标签**：构建后创建或更新 GitHub Release；配置了签名密钥时同时产出已签名 IPA，否则只发布未签名 IPA。
 - **手动运行**：Actions → “Build and release iOS” → Run workflow。可填写版本号；勾选 `release` 会创建或更新 GitHub Release，不勾选只构建 artifact。
 - 版本号优先级：标签 `ios-vX.Y.Z` → 手动输入的 `X.Y.Z` → `ios/FarmHelper/Info.plist`。构建号使用 GitHub `run_number`。
