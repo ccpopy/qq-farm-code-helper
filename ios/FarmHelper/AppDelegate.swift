@@ -36,7 +36,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let info = response.notification.request.content.userInfo
-        pendingNotification = info
+        Self.pendingNotification = info
         NotificationCenter.default.post(name: Self.notificationTapped, object: nil, userInfo: info)
         completionHandler()
     }

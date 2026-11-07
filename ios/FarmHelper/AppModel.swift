@@ -67,7 +67,8 @@ final class AppModel: ObservableObject {
         capture = CaptureStore.shared.current()
         certExists = CertificateAuthority.shared.exists
         BackgroundRefresh.shared.handler = { [weak self] in
-            await self?.runBackgroundRefresh()
+            guard let self else { return }
+            await self.runBackgroundRefresh()
         }
     }
 
