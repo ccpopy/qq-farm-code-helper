@@ -84,9 +84,12 @@ final class TunnelEngine: @unchecked Sendable {
     }
 
     func stats() -> (txPackets: UInt64, txBytes: UInt64, rxPackets: UInt64, rxBytes: UInt64) {
-        var values = [Int](repeating: 0, count: 4)
-        hev_socks5_tunnel_stats(&values[0], &values[1], &values[2], &values[3])
-        return (UInt64(values[0]), UInt64(values[1]), UInt64(values[2]), UInt64(values[3]))
+        var txPackets = 0
+        var txBytes = 0
+        var rxPackets = 0
+        var rxBytes = 0
+        hev_socks5_tunnel_stats(&txPackets, &txBytes, &rxPackets, &rxBytes)
+        return (UInt64(txPackets), UInt64(txBytes), UInt64(rxPackets), UInt64(rxBytes))
     }
 
     private func startPacketRead() {
