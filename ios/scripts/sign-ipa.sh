@@ -71,7 +71,15 @@ fi
 
 if ! /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.networking.networkextension' \
     "$TMP/app-entitlements.plist" 2>/dev/null | /usr/bin/grep -Fq 'packet-tunnel-provider'; then
-  echo "::warning::App profile has no Network Extension entitlement; the tunnel manager may still work, but include it if installation fails."
+  echo "App profile is missing Network Extension entitlement packet-tunnel-provider; NETunnelProviderManager will return permission denied." >&2
+  exit 1
+fi
+
+APP_TEAM=$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.team-identifier' "$TMP/app-entitlements.plist" 2>/dev/null || true)
+TUNNEL_TEAM=$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.team-identifier' "$TMP/tunnel-entitlements.plist" 2>/dev/null || true)
+if [ -z "$APP_TEAM" ] || [ "$APP_TEAM" != "$TUNNEL_TEAM" ]; then
+  echo "App and tunnel profiles are from different teams ('$APP_TEAM' vs '$TUNNEL_TEAM')." >&2
+  exit 1
 fi
 
 # The profile has to sit inside the bundle it belongs to, exactly as Xcode exports it.
