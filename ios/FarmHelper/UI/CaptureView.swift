@@ -60,6 +60,17 @@ struct CaptureView: View {
                 updatePulse()
             }
             .onAppear { updatePulse() }
+            .alert(
+                "VPN 启动失败",
+                isPresented: Binding(
+                    get: { model.vpnSetupError != nil },
+                    set: { if !$0 { model.vpnSetupError = nil } }
+                )
+            ) {
+                Button("好", role: .cancel) { model.vpnSetupError = nil }
+            } message: {
+                Text(model.vpnSetupError ?? "")
+            }
         }
     }
 

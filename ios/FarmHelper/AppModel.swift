@@ -38,6 +38,7 @@ final class AppModel: ObservableObject {
     @Published var loadingAccounts = false
     @Published var busy = false
     @Published var toast: String?
+    @Published var vpnSetupError: String?
     @Published var tunnelStatus: TunnelStatus?
     @Published var vpnState: NEVPNStatus = .invalid
     @Published var certExists = false
@@ -391,7 +392,10 @@ final class AppModel: ObservableObject {
                 showToast("正在启动 VPN")
                 BackgroundRefresh.shared.schedule()
             } catch {
-                showToast("VPN 启动失败：\(error.localizedDescription)")
+                let detail = error.localizedDescription
+                SharedLog.append("VPN", "启动失败：\(detail)", source: .app)
+                vpnSetupError = detail
+                showToast("VPN 启动失败，请查看提示")
             }
         }
     }

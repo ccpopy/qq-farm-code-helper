@@ -197,6 +197,50 @@ FarmHelperTunnel (NEPacketTunnelProvider)
 - Code 有效期为 5 分钟，推送成功后按 generation 清除；跨进程结果快照使用 Keychain 中的设备专属密钥加密后写入 App Group；日志脱敏并限制 200 条。
 - 不提供证书固定绕过、不修改 QQ / 微信、不要求越狱。
 
+## 故障排查：VPN 启动失败 permission denied
+
+这个错误来自 iOS Network Extension 的权限检查，不是服务器地址、Token 或抓包证书的问题。应用代码无法绕过；安装包必须由具备 Network Extension 能力的签名身份签署。
+
+按顺序检查：
+
+1. **签名账号**：必须使用付费 Apple Developer Program（个人或组织）。免费 Apple ID / 个人团队不能使用 Network Extension；TrollStore、未签名 IPA、只做了假签名的安装包同样会得到 `permission denied`。
+2. **两个 App ID 都要开启能力**：
+   - `io.github.ccpopy.farmhelper`
+   - `io.github.ccpopy.farmhelper.tunnel`
+   - 两者都要启用 **Network Extensions**（Packet Tunnel Provider），并加上：
+     - App Groups：`group.io.github.ccpopy.farmhelper`
+     - Keychain Sharing：`io.github.ccpopy.farmhelper`
+   - 主 App 也需要 Network Extension 权限；只给扩展开启、主 App 没开，`NETunnelProviderManager` 仍会返回 permission denied。
+3. **重新生成描述文件**：在开发者后台开启能力后，旧的 `.mobileprovision` 不会自动获得新能力。重新生成主 App 和扩展的 iOS Development / Ad Hoc / App Store 描述文件，并重新签名 `.app` 与 `.appex`。
+4. **两个描述文件必须同 Team**，且分别匹配两个 Bundle ID；Wildcard App ID 不能用于 Network Extension。
+5. **检查最终 IPA 的 entitlements**：
+
+   ```bash
+   unzip -q FarmHelper-ios-vX.Y.Z-signed.ipa -d /tmp/fh
+   codesign -d --entitlements :- /tmp/fh/Payload/FarmHelper.app
+   codesign -d --entitlements :- /tmp/fh/Payload/FarmHelper.app/PlugIns/FarmHelperTunnel.appex
+   ```
+
+   两份输出都必须包含：
+
+   ```xml
+   <key>com.apple.developer.networking.networkextension</key>
+   <array><string>packet-tunnel-provider</string></array>
+   ```
+
+   并且包含 `application-identifier`、`com.apple.developer.team-identifier`、`com.apple.security.application-groups`、`keychain-access-groups`。主 App 缺少第一项就是 permission denied 的最常见原因。
+6. **删除旧配置再装**：删除旧 App，到 设置 › 通用 › VPN 与设备管理 删除旧的“农场助手”VPN 配置，再安装新签名的 IPA。覆盖安装旧配置可能继续引用旧签名。
+7. **真机测试**：Network Extension 不能在 iOS 模拟器运行。
+8. **设备限制**：检查屏幕使用时间、MDM / 设备管理描述文件是否禁止 VPN。
+
+CI 签名要求（配置 secrets 时）：
+
+- `IOS_APP_PROFILE_BASE64` 与 `IOS_TUNNEL_PROFILE_BASE64` 都必须包含 `packet-tunnel-provider`；缺少时 `sign-ipa.sh` 会直接失败，不再生成一个装不上的包。
+- 两个 profile 的 `com.apple.developer.team-identifier` 必须一致。
+- 成功签名后，Release 资产名是 `FarmHelper-ios-vX.Y.Z-signed.ipa`。
+
+如果使用 GitHub Actions 签名，需要重新打一个新的版本标签（例如 `ios-v0.1.4`）；已发布的 `ios-v0.1.3` 不会被覆盖。重新签名 `ios-v0.1.3` 本地 IPA 也可以解决该错误。
+
 ## 已知限制
 
 - 微信 VPN 获取仍是实验性功能：微信可能使用独立网络栈或证书固定，握手失败时日志会显示 `客户端 TLS 握手失败`。
