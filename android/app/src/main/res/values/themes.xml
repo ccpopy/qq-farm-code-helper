@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.FarmHelper" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/farm_accent</item>
+        <item name="colorOnPrimary">@color/farm_on_accent</item>
+        <item name="colorPrimaryContainer">@color/farm_tint</item>
+        <item name="colorOnPrimaryContainer">@color/farm_ink</item>
+        <item name="colorSecondary">@color/farm_accent</item>
+        <item name="colorSecondaryContainer">@color/farm_tint</item>
+        <item name="colorOnSecondaryContainer">@color/farm_ink</item>
+        <item name="colorSurface">@color/farm_card</item>
+        <item name="colorSurfaceContainerHigh">@color/farm_card</item>
+        <item name="colorSurfaceContainerHighest">@color/farm_card</item>
+        <item name="colorOnSurface">@color/farm_ink</item>
+        <item name="colorOnSurfaceVariant">@color/farm_muted</item>
+        <item name="colorOutline">@color/farm_line_strong</item>
+        <item name="colorError">@color/farm_danger</item>
+        <item name="android:colorBackground">@color/farm_surface</item>
+        <item name="android:windowBackground">@color/farm_surface</item>
+        <item name="android:windowLightStatusBar">@bool/light_system_bars</item>
+        <item name="android:windowLightNavigationBar">@bool/light_system_bars</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <!-- Dialogs and bottom sheets follow the app's tighter corner scale. -->
+        <item name="shapeAppearanceCornerExtraLarge">@style/Farm.Corner.ExtraLarge</item>
+        <item name="shapeAppearanceCornerLarge">@style/Farm.Corner.Large</item>
+    </style>
+    <style name="Farm.Corner.ExtraLarge" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">16dp</item>
+    </style>
+    <style name="Farm.Corner.Large" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">12dp</item>
+    </style>
+</resources>

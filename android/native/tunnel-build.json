@@ -1,0 +1,13 @@
+{
+  "upstreamVersion": "2.19.1",
+  "upstreamCommit": "107a5083cb33d729a476c8282745dfc2f12e48e2",
+  "upstreamAarSha256": "107958f7a07051386248ba8dba778b63d8dcefdfb2c3665b0ee9a8c93de5f6ca",
+  "ndkVersion": "28.2.13676358",
+  "submodules": {
+    "src/core": "9f1cf0bfca0c003dd0cf0fbdcf6912a2b46a8d05",
+    "third-part/hev-task-system": "b2f2250371c1bd436a42f3c380ee46d4ac3bada8",
+    "third-part/lwip": "e6d5fc6cdc7c2ab379ffffd13dfdc99fb826a86c",
+    "third-part/yaml": "94441ec8777eb319936735a58b376963d09c73d4"
+  },
+  "abis": ["armeabi-v7a", "arm64-v8a", "x86", "x86_64"]
+}

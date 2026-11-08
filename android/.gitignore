@@ -1,0 +1,23 @@
+/.gradle/
+/.kotlin/
+/local.properties
+/**/build/
+/app/libs/*.aar
+/app/libs/*.aar.json
+*.jks
+*.keystore
+
+# Local QA and device artifacts are deliberately not part of the Android branch.
+/app/src/test/
+/app/src/androidTest/
+/TESTING.md
+/qa/
+/screen*.png
+/screenshots/
+*.apk
+*.apks
+*.aab
+*.cer
+*.crt
+*.pcap
+*.pcapng

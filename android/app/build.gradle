@@ -1,0 +1,106 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Shared across checkouts and agents; never create a replacement signing key.
+def farmSigningProperties = new Properties()
+def farmSigningConfig = new File(System.getProperty('user.home'), '.android/farm-helper/signing.properties')
+if (farmSigningConfig.isFile()) farmSigningConfig.withInputStream { farmSigningProperties.load(it) }
+def farmSigningFile = file(System.getenv('ANDROID_KEYSTORE_PATH') ?: new File(System.getProperty('user.home'), '.android/farm-helper/farm-helper.jks'))
+def farmStorePassword = System.getenv('ANDROID_KEYSTORE_PASSWORD') ?: farmSigningProperties.getProperty('storePassword', '')
+def farmKeyAlias = System.getenv('ANDROID_KEY_ALIAS') ?: farmSigningProperties.getProperty('keyAlias', 'androiddebugkey')
+def farmKeyPassword = System.getenv('ANDROID_KEY_PASSWORD') ?: farmSigningProperties.getProperty('keyPassword', farmStorePassword)
+def farmSigningSha256 = 'cf51c2ee1ed4870e98751894f41cb5406b7f2cd29645df2fa5186f829235c749'
+
+// CI passes the version from android-vX.Y.Z; local builds use the current release.
+def farmVersion = providers.gradleProperty('farmVersion').getOrElse('0.1.3')
+if (!(farmVersion ==~ /(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)/)) {
+    throw new GradleException('farmVersion must be a stable X.Y.Z version.')
+}
+def versionParts = farmVersion.tokenize('.').collect { new BigInteger(it) }
+def farmVersionCode = versionParts[0] * 1000000 + versionParts[1] * 1000 + versionParts[2]
+if (versionParts[1] > 999 || versionParts[2] > 999 || farmVersionCode < 1 || farmVersionCode > 2100000000) {
+    throw new GradleException('Version is outside the supported Android versionCode range.')
+}
+
+android {
+    namespace 'io.github.ccpopy.farmhelper'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'io.github.ccpopy.farmhelper'
+        minSdk 29
+        targetSdk 36
+        versionCode farmVersionCode.intValue()
+        versionName farmVersion
+    }
+
+    signingConfigs {
+        debug {
+            storeFile farmSigningFile
+            storePassword farmStorePassword
+            keyAlias farmKeyAlias
+            keyPassword farmKeyPassword
+        }
+        release {
+            storeFile farmSigningFile
+            storePassword farmStorePassword
+            keyAlias farmKeyAlias
+            keyPassword farmKeyPassword
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            signingConfig signingConfigs.release
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildFeatures { buildConfig true }
+    lint { abortOnError true }
+}
+
+tasks.register('verifyAppIdentity') {
+    doLast {
+        if (android.defaultConfig.applicationId != 'io.github.ccpopy.farmhelper' || android.buildTypes.any { it.applicationIdSuffix }) {
+            throw new GradleException('Keep the canonical package io.github.ccpopy.farmhelper; parallel diagnostic/test application IDs are no longer supported.')
+        }
+        if (!farmSigningFile.isFile()) throw new GradleException('Persistent FarmHelper signing key missing. Restore the existing key described in android/README.md; do not generate a replacement.')
+        def store = java.security.KeyStore.getInstance(farmSigningFile, farmStorePassword.toCharArray())
+        def certificate = store.getCertificate(farmKeyAlias)
+        if (certificate == null || java.security.MessageDigest.getInstance('SHA-256').digest(certificate.encoded).encodeHex().toString() != farmSigningSha256) {
+            throw new GradleException('Signing certificate differs from the installed FarmHelper identity. Use the original persistent key.')
+        }
+        if (!store.isKeyEntry(farmKeyAlias)) throw new GradleException('Signing private key is missing.')
+    }
+}
+tasks.named('preBuild').configure { dependsOn 'verifyAppIdentity' }
+
+def tunnelAar = file('libs/hev-socks5-tunnel-2.19.1-farm1.aar')
+def tunnelManifest = file("${tunnelAar}.json")
+def tunnelInputs = ['android/native/tunnel-build.json', 'android/native/disable-idle-timeouts.patch', 'scripts/build-android-tunnel.ps1']
+def repositoryRoot = rootProject.projectDir.parentFile
+tasks.register('verifyTunnel') {
+    inputs.file(tunnelAar)
+    inputs.file(tunnelManifest)
+    inputs.files(tunnelInputs.collect { new File(repositoryRoot, it) })
+    doLast {
+        if (!tunnelAar.exists()) throw new GradleException('Run scripts/bootstrap-android.ps1 first (pinned VPN AAR).')
+        def digest = { input -> java.security.MessageDigest.getInstance('SHA-256').digest(input.bytes).encodeHex().toString() }
+        def manifest = new groovy.json.JsonSlurper().parse(tunnelManifest)
+        if (manifest.sha256 != digest(tunnelAar) || tunnelInputs.any { manifest.inputs[it] != digest(new File(repositoryRoot, it)) }) {
+            throw new GradleException('VPN library or build inputs changed. Run scripts/bootstrap-android.ps1 to rebuild and verify the pinned native sources.')
+        }
+    }
+}
+tasks.named('preBuild').configure { dependsOn 'verifyTunnel' }
+
+dependencies {
+    implementation 'com.google.android.material:material:1.13.0'
+    implementation files(tunnelAar)
+}

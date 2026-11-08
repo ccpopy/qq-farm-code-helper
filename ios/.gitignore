@@ -1,0 +1,7 @@
+.build/
+Vendor/HevSocks5Tunnel.xcframework/
+FarmHelper.xcodeproj/
+build/
+DerivedData/
+*.xcarchive
+.DS_Store
