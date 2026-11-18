@@ -113,12 +113,10 @@ impl ServerClient {
     ) -> Result<ConnectionInfo, String> {
         let endpoint = endpoint(server_url, "/api/user/me")?;
         let response = self
-            .client
-            .get(endpoint)
-            .header("x-admin-token", token)
-            .send()
-            .await
-            .map_err(|error| format!("连接服务器失败: {error}"))?;
+            .send_with_retry("连接服务器失败", true, |client| {
+                client.get(endpoint.as_str()).header("x-admin-token", token)
+            })
+            .await?;
         let envelope = parse_response(response).await?;
         let data = envelope
             .data
@@ -150,11 +148,29 @@ impl ServerClient {
         } else {
             input.avatar_url.trim()
         };
-        let account_name = existing
-            .as_ref()
-            .map(|account| account.name.trim())
-            .filter(|name| !name.is_empty())
-            .unwrap_or(input.account_name);
+        let new_account_name;
+        let account_name = if let Some(account) = &existing {
+            let name = account.name.trim();
+            if name.is_empty() {
+                input.account_name
+            } else {
+                name
+            }
+        } else {
+            // 服务端会把同名备注视为重新登录，首次同步时用 QQ 号区分账号。
+            new_account_name = format!("{} ({qq_number})", input.account_name);
+            let account_list = accounts
+                .get("accounts")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "服务器返回的账号列表格式无效".to_owned())?;
+            if account_list
+                .iter()
+                .any(|account| first_value(account, &["name"]).trim() == new_account_name)
+            {
+                return Err("服务器已有同名账号，请修改账号备注后重试".to_owned());
+            }
+            &new_account_name
+        };
         let payload = AccountPayload {
             id: existing.as_ref().map(|account| account.id.as_str()),
             name: account_name,
@@ -167,24 +183,32 @@ impl ServerClient {
             avatar,
         };
         let response = self
-            .client
-            .post(endpoint)
-            .header("x-admin-token", token)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|error| format!("同步 Code 失败: {error}"))?;
+            .send_with_retry("同步 Code 失败", false, |client| {
+                client
+                    .post(endpoint.as_str())
+                    .header("x-admin-token", token)
+                    .json(&payload)
+            })
+            .await?;
         let envelope = parse_response(response).await?;
         let data = envelope
             .data
             .ok_or_else(|| "服务器没有返回账号信息".to_owned())?;
-        let mut profile = if let Some(existing) = existing {
+        let mut profile = if let Some(existing) = &existing {
             account_profile_by_id(&data, &existing.id)
-                .ok_or_else(|| format!("服务器更新账号 {} 后没有返回对应账号信息", existing.id))?
         } else {
-            newest_account_profile(&data)
-                .ok_or_else(|| "服务器没有返回可识别的账号 ID".to_owned())?
-        };
+            data.get("accounts")
+                .and_then(Value::as_array)
+                .and_then(|list| {
+                    list.iter().find(|account| {
+                        first_value(account, &["uin", "qq"]) == qq_number
+                            && first_value(account, &["name"]) == account_name
+                    })
+                })
+                .and_then(account_profile_from_value)
+        }
+        .filter(|profile| profile.qq_number == qq_number)
+        .ok_or_else(|| format!("服务器没有返回 QQ {qq_number} 的账号信息"))?;
 
         self.start_account(server_url, token, &profile.account_id)
             .await?;
@@ -214,14 +238,14 @@ impl ServerClient {
         validate_friend_gids(gids)?;
         let endpoint = endpoint(server_url, "/api/friend-known-gids/batch-add")?;
         let response = self
-            .client
-            .post(endpoint)
-            .header("x-admin-token", token)
-            .header("x-account-id", account_id)
-            .json(&FriendGidsPayload { gids })
-            .send()
-            .await
-            .map_err(|error| format!("批量同步好友 GID 失败: {error}"))?;
+            .send_with_retry("批量同步好友 GID 失败", false, |client| {
+                client
+                    .post(endpoint.as_str())
+                    .header("x-admin-token", token)
+                    .header("x-account-id", account_id)
+                    .json(&FriendGidsPayload { gids })
+            })
+            .await?;
         let envelope = parse_response(response).await?;
         let data = envelope
             .data
@@ -244,14 +268,14 @@ impl ServerClient {
         validate_friend_gids(gids)?;
         let endpoint = endpoint(server_url, "/api/friend-known-gids/batch-remove")?;
         let response = self
-            .client
-            .post(endpoint)
-            .header("x-admin-token", token)
-            .header("x-account-id", account_id)
-            .json(&FriendGidsPayload { gids })
-            .send()
-            .await
-            .map_err(|error| format!("清理自身 GID 失败: {error}"))?;
+            .send_with_retry("清理自身 GID 失败", false, |client| {
+                client
+                    .post(endpoint.as_str())
+                    .header("x-admin-token", token)
+                    .header("x-account-id", account_id)
+                    .json(&FriendGidsPayload { gids })
+            })
+            .await?;
         let envelope = parse_response(response).await?;
         let data = envelope
             .data
@@ -272,12 +296,16 @@ impl ServerClient {
         let endpoint = endpoint(server_url, &path)
             .map_err(|error| format!("Code 已同步，但自动启动远程账号失败: {error}"))?;
         let response = self
-            .client
-            .post(endpoint)
-            .header("x-admin-token", token)
-            .send()
-            .await
-            .map_err(|error| format!("Code 已同步，但自动启动远程账号失败: {error}"))?;
+            .send_with_retry(
+                "Code 已同步，但自动启动远程账号失败",
+                false,
+                |client| {
+                    client
+                        .post(endpoint.as_str())
+                        .header("x-admin-token", token)
+                },
+            )
+            .await?;
         parse_response(response)
             .await
             .map(|_| ())
@@ -297,16 +325,40 @@ impl ServerClient {
     async fn get_accounts_data(&self, server_url: &str, token: &str) -> Result<Value, String> {
         let endpoint = endpoint(server_url, "/api/accounts")?;
         let response = self
-            .client
-            .get(endpoint)
-            .header("x-admin-token", token)
-            .send()
-            .await
-            .map_err(|error| format!("读取远程账号信息失败: {error}"))?;
+            .send_with_retry("读取远程账号信息失败", true, |client| {
+                client.get(endpoint.as_str()).header("x-admin-token", token)
+            })
+            .await?;
         let envelope = parse_response(response).await?;
         envelope
             .data
             .ok_or_else(|| "服务器没有返回账号列表".to_owned())
+    }
+
+    async fn send_with_retry<F>(
+        &self,
+        prefix: &str,
+        retry_on_reset: bool,
+        build: F,
+    ) -> Result<reqwest::Response, String>
+    where
+        F: Fn(&Client) -> reqwest::RequestBuilder,
+    {
+        let mut remaining_retries = 2;
+        loop {
+            match build(&self.client).send().await {
+                Ok(response) => return Ok(response),
+                Err(error)
+                    if remaining_retries > 0
+                        && (error.is_connect()
+                            || (retry_on_reset && is_connection_reset(&error))) =>
+                {
+                    remaining_retries -= 1;
+                    sleep(Duration::from_millis(40)).await;
+                }
+                Err(error) => return Err(format_request_error(prefix, error)),
+            }
+        }
     }
 }
 
@@ -346,13 +398,6 @@ impl AccountProfile {
     pub(crate) fn has_game_identity(&self) -> bool {
         !self.nickname.is_empty() && (!self.gid.is_empty() || !self.open_id.is_empty())
     }
-}
-
-fn newest_account_profile(data: &Value) -> Option<AccountProfile> {
-    data.get("accounts")
-        .and_then(Value::as_array)?
-        .last()
-        .and_then(account_profile_from_value)
 }
 
 fn existing_qq_account(
@@ -481,14 +526,51 @@ fn endpoint(server_url: &str, path: &str) -> Result<String, String> {
     Ok(format!("{base}{path}"))
 }
 
+fn is_connection_reset(error: &reqwest::Error) -> bool {
+    use std::{error::Error, io};
+
+    let mut current = error.source();
+    while let Some(source) = current {
+        if let Some(io_error) = source.downcast_ref::<io::Error>()
+            && matches!(
+                io_error.kind(),
+                io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::BrokenPipe
+            )
+        {
+            return true;
+        }
+        current = source.source();
+    }
+    false
+}
+
+fn format_request_error(prefix: &str, error: reqwest::Error) -> String {
+    use std::{error::Error, fmt::Write};
+
+    let mut message = format!("{prefix}: {error}");
+    let mut current = error.source();
+    while let Some(source) = current {
+        let _ = write!(message, " ({source})");
+        current = source.source();
+    }
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
         sync::oneshot,
     };
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn builds_api_endpoint() {
@@ -517,8 +599,8 @@ mod tests {
     async fn sync_creates_account_when_qq_is_not_present() {
         let (server_url, request_receiver) = serve_http_responses(vec![
             r#"{"ok":true,"data":{"username":"admin","role":"admin"}}"#,
-            r#"{"ok":true,"data":{"accounts":[],"nextId":7}}"#,
-            r#"{"ok":true,"data":{"accounts":[{"id":"7","name":"Windows QQ","username":"admin","nick":"测试农夫","uin":"12345678","gid":1027000001,"openId":"openid-test","avatar":"https://example.com/avatar.png","running":true}]}}"#,
+            r#"{"ok":true,"data":{"accounts":[{"id":"6","name":"Windows QQ","username":"admin","uin":"88888888","running":true}],"nextId":7}}"#,
+            r#"{"ok":true,"data":{"accounts":[{"id":"6","name":"Windows QQ","username":"admin","uin":"88888888","running":true},{"id":"7","name":"Windows QQ (12345678)","username":"admin","nick":"测试农夫","uin":"12345678","gid":1027000001,"openId":"openid-test","avatar":"https://example.com/avatar.png","running":true},{"id":"8","name":"Windows QQ (99999999)","username":"admin","uin":"99999999","running":true}]}}"#,
             r#"{"ok":true}"#,
         ])
         .await;
@@ -538,6 +620,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(profile.account_id, "7");
         assert_eq!(profile.nickname, "测试农夫");
         assert_eq!(profile.gid, "1027000001");
         assert_eq!(profile.qq_number, "12345678");
@@ -554,6 +637,7 @@ mod tests {
         );
         assert!(request.contains("\"platform\":\"qq\""));
         assert!(request.contains("\"loginType\":\"manual\""));
+        assert!(request.contains("\"name\":\"Windows QQ (12345678)\""));
         assert!(request.contains("\"uin\":\"12345678\""));
         assert!(request.contains("\"nick\":\"本机昵称\""));
         assert!(request.contains("example.com/local-avatar.png"));
@@ -611,7 +695,7 @@ mod tests {
         let (server_url, request_receiver) = serve_http_responses(vec![
             r#"{"ok":true,"data":{"username":"admin","role":"admin"}}"#,
             r#"{"ok":true,"data":{"accounts":[{"id":"5","name":"其他用户账号","username":"alice","platform":"qq","uin":"12345678","running":true}]}}"#,
-            r#"{"ok":true,"data":{"accounts":[{"id":"5","name":"其他用户账号","username":"alice","platform":"qq","uin":"12345678","running":true},{"id":"6","name":"Windows QQ","username":"admin","platform":"qq","nick":"测试农夫","uin":"12345678","gid":1027000001,"openId":"openid-new","running":true}]}}"#,
+            r#"{"ok":true,"data":{"accounts":[{"id":"5","name":"其他用户账号","username":"alice","platform":"qq","uin":"12345678","running":true},{"id":"6","name":"Windows QQ (12345678)","username":"admin","platform":"qq","nick":"测试农夫","uin":"12345678","gid":1027000001,"openId":"openid-new","running":true}]}}"#,
             r#"{"ok":true}"#,
         ])
         .await;
@@ -643,7 +727,7 @@ mod tests {
         let (server_url, _request_receiver) = serve_http_responses(vec![
             r#"{"ok":true,"data":{"username":"admin","role":"admin"}}"#,
             r#"{"ok":true,"data":{"accounts":[],"nextId":7}}"#,
-            r#"{"ok":true,"data":{"accounts":[{"id":"7","name":"Windows QQ","username":"admin","uin":"12345678","running":false}]}}"#,
+            r#"{"ok":true,"data":{"accounts":[{"id":"7","name":"Windows QQ (12345678)","username":"admin","uin":"12345678","running":false}]}}"#,
             r#"{"ok":false,"error":"Account not found"}"#,
         ])
         .await;
@@ -773,24 +857,41 @@ mod tests {
         assert!(request.contains(r#"{"gids":["10002"]}"#));
     }
 
-    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
-        let mut bytes = Vec::new();
-        let mut buffer = [0_u8; 1024];
-        let mut expected_length = None;
-        loop {
-            let read = socket.read(&mut buffer).await.unwrap();
-            if read == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&buffer[..read]);
-            if expected_length.is_none() {
-                expected_length = total_request_length(&bytes);
-            }
-            if expected_length.is_some_and(|length| bytes.len() >= length) {
-                break;
-            }
-        }
-        String::from_utf8(bytes).unwrap()
+    struct MockServerState {
+        bodies: VecDeque<&'static str>,
+        requests: Vec<String>,
+        sender: Option<oneshot::Sender<Vec<String>>>,
+    }
+
+    async fn read_http_request(
+        socket: &mut tokio::net::TcpStream,
+        pending: &mut Vec<u8>,
+    ) -> Option<String> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut buffer = [0_u8; 1024];
+            let expected_length = loop {
+                if let Some(length) = total_request_length(pending)
+                    && pending.len() >= length
+                {
+                    break length;
+                }
+                let read = socket.read(&mut buffer).await.ok()?;
+                if read == 0 {
+                    return None;
+                }
+                pending.extend_from_slice(&buffer[..read]);
+            };
+            let bytes: Vec<u8> = pending.drain(..expected_length).collect();
+            let request = String::from_utf8(bytes).ok()?;
+            request
+                .lines()
+                .next()
+                .is_some_and(|line| line.contains(" /api/"))
+                .then_some(request)
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     async fn serve_http_responses(
@@ -799,19 +900,70 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (request_sender, request_receiver) = oneshot::channel();
+        let state = Arc::new(Mutex::new(MockServerState {
+            bodies: VecDeque::from(bodies),
+            requests: Vec::new(),
+            sender: Some(request_sender),
+        }));
+        let done = CancellationToken::new();
+
         tokio::spawn(async move {
-            let mut requests = Vec::with_capacity(bodies.len());
-            for body in bodies {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                requests.push(read_http_request(&mut socket).await);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                socket.write_all(response.as_bytes()).await.unwrap();
+            loop {
+                let accepted = tokio::select! {
+                    _ = done.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((mut socket, _)) = accepted else {
+                    break;
+                };
+                let state = Arc::clone(&state);
+                let done = done.clone();
+                tokio::spawn(async move {
+                    let mut pending = Vec::new();
+                    while let Some(request) = read_http_request(&mut socket, &mut pending).await {
+                        let (body, completed) = {
+                            let mut guard = state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            let Some(body) = guard.bodies.pop_front() else {
+                                return;
+                            };
+                            guard.requests.push(request);
+                            let completed = if guard.bodies.is_empty() {
+                                guard
+                                    .sender
+                                    .take()
+                                    .map(|sender| (sender, std::mem::take(&mut guard.requests)))
+                            } else {
+                                None
+                            };
+                            (body, completed)
+                        };
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        if socket.write_all(response.as_bytes()).await.is_err() {
+                            break;
+                        }
+                        if socket.flush().await.is_err() {
+                            break;
+                        }
+                        if let Some((sender, requests)) = completed {
+                            let _ = sender.send(requests);
+                        }
+                    }
+                    if state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .bodies
+                        .is_empty()
+                    {
+                        done.cancel();
+                    }
+                });
             }
-            request_sender.send(requests).unwrap();
         });
         (format!("http://127.0.0.1:{port}"), request_receiver)
     }

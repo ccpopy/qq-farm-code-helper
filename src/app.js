@@ -24,6 +24,7 @@ const elements = {
   protocolFlow: document.querySelector('#protocolFlow'),
   protocolFlowPort: document.querySelector('#protocolFlowPort'),
   protocolModeNotice: document.querySelector('#protocolModeNotice'),
+  protocolModeNoticeCopy: document.querySelector('#protocolModeNoticeCopy'),
   proxyPort: document.querySelector('#proxyPort'),
   saveButton: document.querySelector('#saveButton'),
   serverToken: document.querySelector('#serverToken'),
@@ -60,9 +61,17 @@ const protocolUnlockTarget = 5
 
 let currentPhase = 'idle'
 let currentCaptureDirectory = ''
-let currentSession = { active: false, target: null, detail: '' }
+let currentSession = {
+  active: false,
+  protocolMode: false,
+  proxyPort: null,
+  armedQq: null,
+  target: null,
+  detail: '',
+}
 let currentIdentityCandidates = []
 let currentIdentityError = ''
+let consecutiveIdentityFailures = 0
 let hasIdentityResult = false
 let identityRequest = null
 let latestUpdate = null
@@ -70,7 +79,7 @@ let updateDownloadInProgress = false
 let updateProxySaveQueue = Promise.resolve()
 let preferredQqNumber = ''
 let pendingSyncQq = null
-let codeQqNumber = null
+let modeSwitchPending = false
 let protocolModeUnlocked = false
 let protocolUnlockClicks = 0
 let savedProtocolCapture = false
@@ -79,6 +88,10 @@ let stopPending = false
 let toastSequence = 0
 // 本次运行中每个 QQ 的最近结果；停止代理后仍保留，方便对照哪些账号还没同步。
 const accountResults = new Map()
+// 正在后台捕获或向服务器同步的账号（可与下一个待命账号并发推进）。
+const accountSyncStates = new Map()
+// 每个 QQ 保留自己尚未清除的可复制 Code，切号不会互相覆盖。
+const codeQqNumbers = new Set()
 
 const toastIcons = {
   success: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>',
@@ -335,6 +348,8 @@ function handleVersionChipClick() {
   }
 
   protocolModeUnlocked = true
+  if (currentSession.active)
+    savedProtocolCapture = currentSession.protocolMode
   elements.protocolCapture.checked = savedProtocolCapture
   syncDeveloperControls()
   syncTaskUi()
@@ -349,43 +364,51 @@ function handleVersionChipClick() {
 
 function syncModePresentation() {
   const protocolMode = isProtocolMode()
-  const listening = currentPhase === 'protocol_listening'
+  const listening = currentSession.active && (currentPhase === 'protocol_listening' || currentSession.protocolMode)
+  const port = currentSession.active && currentSession.proxyPort
+    ? currentSession.proxyPort
+    : (elements.proxyPort.value || 8899)
   elements.settingsCard.classList.toggle('protocol-enabled', protocolMode)
   elements.sessionCard.classList.toggle('protocol-enabled', protocolMode)
   elements.protocolField.classList.toggle('active', protocolMode)
   elements.protocolModeNotice.classList.toggle('hidden', !protocolMode)
+  if (elements.protocolModeNoticeCopy) {
+    elements.protocolModeNoticeCopy.textContent = currentSession.active && protocolMode
+      ? '正在复用当前代理监听网关消息；关闭开关即可切回账号同步，无需停止网络。'
+      : '启动后显示代理端口和日志目录。'
+  }
   elements.protocolFlow.classList.toggle('hidden', !protocolMode)
   elements.protocolFlow.classList.toggle('listening', listening)
-  elements.protocolFlowPort.textContent = String(elements.proxyPort.value || 8899)
-  elements.startButton.classList.toggle('hidden', !protocolMode && currentSession.active)
+  elements.protocolFlowPort.textContent = String(port)
+  elements.startButton.classList.toggle('hidden', currentSession.active)
   elements.stopButton.classList.toggle('hidden', !currentSession.active)
   elements.sessionLabel.textContent = protocolMode ? '协议模式' : '网络接管'
 }
 
 function syncTaskUi() {
-  const isActive = currentSession.active || startPending || currentPhase === 'preparing_proxy'
+  const starting = startPending || currentPhase === 'preparing_proxy'
+  const sessionActive = currentSession.active || starting
   const protocolMode = isProtocolMode()
   for (const element of [
     elements.accountName,
     elements.autoSync,
-    elements.syncOfficialFriends,
     elements.serverToken,
     elements.serverUrl,
     elements.testButton,
     elements.toggleToken,
   ])
-    element.disabled = isActive || protocolMode
-  for (const element of [elements.protocolCapture, elements.proxyPort, elements.saveButton])
-    element.disabled = isActive
-  elements.syncOfficialFriends.disabled = isActive || protocolMode || !elements.autoSync.checked
-  elements.startButton.disabled = isActive
-  elements.startButtonText.textContent = startPending || currentPhase === 'preparing_proxy'
+    element.disabled = starting || stopPending || protocolMode
+  elements.syncOfficialFriends.disabled = starting || stopPending || protocolMode || !elements.autoSync.checked
+  elements.protocolCapture.disabled = starting || stopPending || modeSwitchPending
+  elements.proxyPort.disabled = sessionActive || stopPending
+  elements.proxyPort.title = sessionActive ? '代理运行期间端口固定，停止后可修改' : ''
+  elements.saveButton.disabled = starting || stopPending || modeSwitchPending
+  elements.startButton.disabled = sessionActive || stopPending || modeSwitchPending
+  elements.startButtonText.textContent = starting
     ? '正在启动…'
-    : (isActive && protocolMode ? '正在监听…' : (protocolMode ? '启动协议监听' : '启动代理'))
-  elements.stopButton.disabled = !currentSession.active || currentPhase === 'preparing_proxy' || stopPending
-  elements.cleanupButton.disabled = startPending
-    || stopPending
-    || currentPhase === 'preparing_proxy'
+    : (protocolMode ? '启动协议监听' : '启动代理')
+  elements.stopButton.disabled = !currentSession.active || starting || stopPending || modeSwitchPending
+  elements.cleanupButton.disabled = starting || stopPending || modeSwitchPending
   syncModePresentation()
 }
 
@@ -575,35 +598,42 @@ function rememberAccountResult(status) {
 }
 
 function liveAccountState(qq) {
-  if (pendingSyncQq === qq) {
+  if (pendingSyncQq === qq && !currentSession.active) {
     return {
       state: 'working',
-      label: currentSession.active ? '切换中' : '正在启动',
-      detail: currentSession.active ? '正在确认账号' : '正在安装临时证书，请在弹窗中确认',
+      label: '正在启动',
+      detail: '正在安装临时证书，请在弹窗中确认',
     }
   }
-  if (!currentSession.active || currentSession.target !== qq)
-    return null
-  if (currentPhase === 'waiting_login') {
+  if (currentSession.active && !currentSession.protocolMode && currentSession.armedQq === qq) {
+    const detail = currentPhase === 'waiting_login'
+      ? (detailLines(currentSession.detail).slice(1).join(' · ') || '在这个 QQ 里打开农场')
+      : (elements.autoSync.checked ? '在这个 QQ 里打开农场；获取后自动同步' : '在这个 QQ 里打开农场；获取 Code')
     return {
       state: 'waiting',
       label: '等待打开农场',
-      detail: detailLines(currentSession.detail).slice(1).join(' · ') || '在这个 QQ 里打开农场',
+      detail,
+      phase: 'waiting_login',
     }
   }
-  if (currentPhase === 'code_captured' || currentPhase === 'syncing') {
+  const syncing = accountSyncStates.get(qq)
+  if (syncing) {
     return {
       state: 'working',
-      label: currentPhase === 'syncing' ? '正在同步' : '已获取 Code',
-      detail: detailLines(currentSession.detail).join(' · '),
+      label: syncing.phase === 'syncing' ? '正在同步' : '已获取 Code',
+      detail: detailLines(syncing.detail).join(' · '),
+      phase: syncing.phase,
     }
   }
   return null
 }
 
 function accountBusy() {
-  return startPending || Boolean(pendingSyncQq)
-    || ['preparing_proxy', 'code_captured', 'syncing'].includes(currentPhase)
+  return startPending
+    || stopPending
+    || modeSwitchPending
+    || currentPhase === 'preparing_proxy'
+    || Boolean(pendingSyncQq)
 }
 
 function plotRows() {
@@ -682,21 +712,27 @@ function buildPlotRow({ identity, online }) {
   actions.className = 'plot-actions'
   const protocolMode = isProtocolMode()
   const busy = accountBusy()
+  const anotherWaiting = currentSession.active
+    && !currentSession.protocolMode
+    && currentSession.armedQq
+    && currentSession.armedQq !== qq
   if (view.state === 'waiting') {
     actions.append(plotButton('取消', 'plot-secondary', `取消同步 ${name}`, () => cancelAccountSync(), stopPending))
   }
   else if (view.state !== 'working') {
-    const verb = elements.autoSync.checked ? '同步' : '获取 Code'
-    const again = result ? `重新${elements.autoSync.checked ? '同步' : '获取'}` : verb
+    const actionNoun = elements.autoSync.checked ? '同步' : '获取'
+    const labelText = result
+      ? `重新${actionNoun}`
+      : (anotherWaiting ? `切换${actionNoun}` : (elements.autoSync.checked ? '同步' : '获取 Code'))
     const disabled = !online || busy || protocolMode || stopPending
-    actions.append(plotButton(again, result ? 'plot-secondary' : 'plot-primary', `${again} ${name}`, () => syncAccount(qq), disabled))
+    actions.append(plotButton(labelText, result ? 'plot-secondary' : 'plot-primary', `${labelText} ${name}`, () => syncAccount(qq), disabled))
   }
-  if (codeQqNumber === qq && !live)
-    actions.append(plotButton('复制 Code', 'plot-secondary', `复制 ${name} 的 Code`, copyCode, false))
+  if (codeQqNumbers.has(qq) && !live)
+    actions.append(plotButton('复制 Code', 'plot-secondary', `复制 ${name} 的 Code`, () => copyCode(qq), false))
 
   item.append(avatar, who, state, actions)
 
-  const active = live && pendingSyncQq !== qq ? plotStepIndex(currentPhase) : -1
+  const active = live?.phase ? plotStepIndex(live.phase) : -1
   if (active >= 0) {
     const steps = document.createElement('ol')
     steps.className = 'plot-steps'
@@ -765,43 +801,92 @@ function showStatusToast(status) {
   }[status.phase]
   if (!config)
     return
+  const suffix = status.target_qq ? `-${status.target_qq}` : ''
   showToast(status.detail || status.title, {
     ...config,
-    id: `capture-status-${status.phase}`,
+    id: `capture-status-${status.phase}${suffix}`,
     title: status.title,
   })
 }
 
 function sessionCopy(status) {
-  if (isProtocolMode() || !['waiting_login', 'code_captured', 'syncing', 'completed', 'error', 'identity_changed', 'ready'].includes(status.phase) || !status.session_active)
+  if (status.protocol_mode)
+    return { title: '协议模式', detail: `代理端口 ${status.proxy_port}` }
+  if (isProtocolMode() || !status.session_active)
     return { title: status.title, detail: status.detail }
-  const port = elements.proxyPort.value || 8899
-  const target = status.target_qq ? identityByQqNumber(status.target_qq) : null
-  const who = target ? `${target.nickname || '未命名'}（QQ ${target.qqNumber}）` : (status.target_qq ? `QQ ${status.target_qq}` : '')
-  const detail = {
-    ready: '选择账号开始同步',
-    waiting_login: who ? `${who} · 在这个 QQ 里打开农场` : '在所选 QQ 里打开农场',
-    code_captured: who ? `${who} · 已获取 Code` : '已获取 Code',
-    syncing: who ? `${who} · 正在同步` : '正在同步',
-  }[status.phase] || '可以选择下一个账号继续同步'
-  return { title: `代理运行中 · 端口 ${port}`, detail }
+  const port = status.proxy_port || elements.proxyPort.value || 8899
+  const armedQq = status.armed_qq
+  if (armedQq) {
+    const target = identityByQqNumber(armedQq)
+    const who = target ? `${target.nickname || '未命名'}（QQ ${target.qqNumber}）` : `QQ ${armedQq}`
+    return {
+      title: `代理运行中 · 端口 ${port}`,
+      detail: `${who} · 在这个 QQ 里打开农场`,
+    }
+  }
+  if (accountSyncStates.size > 0) {
+    const [syncingQq] = accountSyncStates.keys()
+    const target = identityByQqNumber(syncingQq)
+    const who = target ? `${target.nickname || '未命名'}（QQ ${target.qqNumber}）` : `QQ ${syncingQq}`
+    const extra = accountSyncStates.size > 1 ? ` 等 ${accountSyncStates.size} 个账号` : ''
+    return {
+      title: `代理运行中 · 端口 ${port}`,
+      detail: `${who}${extra}正在后台同步 · 可直接选择下一个账号`,
+    }
+  }
+  if (status.phase === 'ready' && status.detail)
+    return { title: `代理运行中 · 端口 ${port}`, detail: status.detail }
+  return { title: `代理运行中 · 端口 ${port}`, detail: '选择账号开始同步' }
 }
 
 function renderStatus(status, { notify = false } = {}) {
   const phase = status.phase || 'idle'
   const previousPhase = currentPhase
   const previousDetail = currentSession.detail
+  const previousTarget = currentSession.target
   currentPhase = phase
+  if (status.protocol_mode) {
+    protocolModeUnlocked = true
+    savedProtocolCapture = true
+    elements.protocolCapture.checked = true
+    syncDeveloperControls()
+  }
   currentSession = {
     active: Boolean(status.session_active),
+    protocolMode: Boolean(status.protocol_mode),
+    proxyPort: status.proxy_port || null,
+    armedQq: status.armed_qq || null,
     target: status.target_qq || null,
     detail: status.detail || '',
   }
-  if (status.code_available && status.target_qq)
-    codeQqNumber = status.target_qq
-  else if (!status.code_available)
-    codeQqNumber = null
-  if (notify && (phase !== previousPhase || status.detail !== previousDetail))
+  const targetQq = status.target_qq
+  if (phase === 'preparing_proxy') {
+    accountSyncStates.clear()
+    codeQqNumbers.clear()
+  }
+  else if (phase === 'waiting_login' && targetQq) {
+    accountSyncStates.delete(targetQq)
+  }
+  else if ((phase === 'code_captured' || phase === 'syncing') && targetQq) {
+    accountSyncStates.set(targetQq, { phase, detail: status.detail || '' })
+    if (status.code_available)
+      codeQqNumbers.add(targetQq)
+  }
+  else if ((phase === 'completed' || phase === 'error' || phase === 'identity_changed') && targetQq) {
+    accountSyncStates.delete(targetQq)
+    if (status.code_available)
+      codeQqNumbers.add(targetQq)
+    else
+      codeQqNumbers.delete(targetQq)
+  }
+  else if (phase === 'stopped' || phase === 'idle') {
+    accountSyncStates.clear()
+    if (!status.code_available)
+      codeQqNumbers.clear()
+  }
+
+  const changed = phase !== previousPhase || currentSession.detail !== previousDetail || currentSession.target !== previousTarget
+  if (notify && changed)
     rememberAccountResult(status)
   const isActive = currentSession.active || phase === 'preparing_proxy'
   const isError = phase === 'error' || phase === 'identity_changed'
@@ -816,7 +901,7 @@ function renderStatus(status, { notify = false } = {}) {
   elements.sessionCard.classList.toggle('running', isActive)
   renderAccounts()
   syncTaskUi()
-  if (notify && (phase !== previousPhase || status.detail !== previousDetail))
+  if (notify && changed)
     showStatusToast(status)
 }
 
@@ -869,7 +954,8 @@ async function startCapture() {
   renderAccounts()
   syncTaskUi()
   try {
-    await invoke('save_settings', settingsPayload())
+    const saved = await invoke('save_settings', settingsPayload())
+    savedProtocolCapture = saved.settings.protocol_capture === true
     elements.serverToken.value = ''
     await invoke('start_capture')
   }
@@ -895,7 +981,8 @@ async function syncAccount(qqNumber) {
   try {
     if (firstStart) {
       preferredQqNumber = qqNumber
-      await invoke('save_settings', settingsPayload())
+      const saved = await invoke('save_settings', settingsPayload())
+      savedProtocolCapture = saved.settings.protocol_capture === true
       elements.serverToken.value = ''
     }
     await invoke('sync_account', { qqNumber })
@@ -911,6 +998,51 @@ async function syncAccount(qqNumber) {
     startPending = false
     renderAccounts()
     syncTaskUi()
+  }
+}
+
+async function toggleProtocolMode() {
+  if (modeSwitchPending)
+    return
+  const enabled = elements.protocolCapture.checked
+  modeSwitchPending = true
+  syncTaskUi()
+  renderAccounts()
+  showMessage('')
+  try {
+    const result = await invoke('set_protocol_capture', { enabled })
+    savedProtocolCapture = result.settings.protocol_capture === true
+    elements.protocolCapture.checked = protocolModeUnlocked && savedProtocolCapture
+    if (currentSession.active && !enabled) {
+      showToast('已切回账号模式，代理保持运行。', {
+        type: 'success',
+        title: '已退出协议模式',
+        id: 'protocol-mode-switch',
+      })
+    }
+  }
+  catch (error) {
+    elements.protocolCapture.checked = !enabled
+    showMessage(String(error), { type: 'error', title: '切换协议模式失败' })
+  }
+  finally {
+    modeSwitchPending = false
+    syncTaskUi()
+    renderAccounts()
+  }
+}
+
+async function saveSyncOptions() {
+  syncTaskUi()
+  renderAccounts()
+  try {
+    await invoke('save_sync_options', {
+      autoSync: elements.autoSync.checked,
+      syncOfficialFriends: elements.syncOfficialFriends.checked,
+    })
+  }
+  catch (error) {
+    showToast(String(error), { type: 'warning', title: '同步开关未保存', id: 'sync-options-setting' })
   }
 }
 
@@ -958,9 +1090,9 @@ async function cleanupNetwork() {
   }
 }
 
-async function copyCode() {
+async function copyCode(qqNumber) {
   try {
-    const code = await invoke('get_captured_code')
+    const code = await invoke('get_captured_code', { qqNumber: qqNumber || null })
     await navigator.clipboard.writeText(code)
     showMessage('Code 已复制到剪贴板，请尽快使用。', { type: 'success', title: '复制成功' })
   }
@@ -1010,6 +1142,11 @@ function sameAccounts(next) {
     })
 }
 
+function isTransientIdentityError(message) {
+  const text = String(message || '')
+  return text.includes('正在变化') || text.includes('超过 2 秒') || text.includes('发生异常')
+}
+
 async function detectLocalQq({ notify = true } = {}) {
   if (notify)
     elements.detectQqButton.classList.add('spinning')
@@ -1019,6 +1156,7 @@ async function detectLocalQq({ notify = true } = {}) {
     const identities = await identityRequest
     const next = Array.isArray(identities) ? identities : []
     const changed = !hasIdentityResult || currentIdentityError || !sameAccounts(next)
+    consecutiveIdentityFailures = 0
     hasIdentityResult = true
     currentIdentityError = ''
     currentIdentityCandidates = next
@@ -1028,14 +1166,18 @@ async function detectLocalQq({ notify = true } = {}) {
       showToast(next.length ? `检测到 ${next.length} 个已登录的 QQ。` : '没有检测到已登录的 Windows QQ。', { type: next.length ? 'success' : 'warning', title: '账号列表已刷新', id: 'identity-unavailable' })
   }
   catch (error) {
-    const changed = !hasIdentityResult || currentIdentityError !== String(error) || currentIdentityCandidates.length
+    consecutiveIdentityFailures += 1
+    const message = String(error)
+    if (!notify && currentIdentityCandidates.length > 0 && consecutiveIdentityFailures < 2 && isTransientIdentityError(message))
+      return
+    const changed = !hasIdentityResult || currentIdentityError !== message || currentIdentityCandidates.length
     hasIdentityResult = true
     currentIdentityCandidates = []
-    currentIdentityError = String(error)
+    currentIdentityError = message
     if (changed)
       renderAccounts()
     if (notify)
-      showMessage(String(error), { type: 'warning', title: '未检测到可确认的 QQ', duration: 9000, id: 'identity-unavailable' })
+      showMessage(message, { type: 'warning', title: '未检测到可确认的 QQ', duration: 9000, id: 'identity-unavailable' })
   }
   finally {
     if (notify)
@@ -1087,14 +1229,13 @@ elements.updateProxyUrl.addEventListener('keydown', (event) => {
   }
 })
 elements.autoSync.addEventListener('change', () => {
-  syncTaskUi()
-  renderAccounts()
+  void saveSyncOptions()
+})
+elements.syncOfficialFriends.addEventListener('change', () => {
+  void saveSyncOptions()
 })
 elements.protocolCapture.addEventListener('change', () => {
-  savedProtocolCapture = elements.protocolCapture.checked
-  syncTaskUi()
-  renderAccounts()
-  showMessage('')
+  void toggleProtocolMode()
 })
 elements.proxyPort.addEventListener('input', () => {
   if (isProtocolMode())

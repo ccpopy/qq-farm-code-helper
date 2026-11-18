@@ -148,7 +148,21 @@ impl ProtocolCaptureSession {
         }
     }
 
-    fn store_handshake_url(&self, url: &str) -> Result<u64, String> {
+    pub(crate) fn cleanup_if_empty(self) {
+        let Self { directory, writer } = self;
+        let is_empty = {
+            let guard = writer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.connection_count == 0 && guard.message_count == 0
+        };
+        if is_empty {
+            drop(writer);
+            let _ = fs::remove_dir_all(directory);
+        }
+    }
+
+    pub(crate) fn store_handshake_url(&self, url: &str) -> Result<u64, String> {
         let mut writer = self
             .writer
             .lock()
@@ -241,6 +255,19 @@ where
     let handshake_url = target_websocket_url(&request_headers)?;
     let connection_id = session.store_handshake_url(&handshake_url)?;
     let (client, upstream) = open_target_websocket(client, request_headers, upstream_tls).await?;
+    relay_opened_websocket(client, upstream, connection_id, session).await
+}
+
+pub(crate) async fn relay_opened_websocket<C, U>(
+    client: C,
+    upstream: U,
+    connection_id: u64,
+    session: Arc<ProtocolCaptureSession>,
+) -> Result<(), String>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
     let (client_reader, client_writer) = tokio::io::split(client);
     let (upstream_reader, upstream_writer) = tokio::io::split(upstream);
 
@@ -655,6 +682,37 @@ mod tests {
         assert!(manifest.contains("server_to_client"));
 
         drop(session);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_removes_empty_session_directories_and_keeps_non_empty_ones() {
+        let root = std::env::temp_dir().join(format!(
+            "qq-farm-protocol-cleanup-{}-{}",
+            std::process::id(),
+            unix_timestamp_ms()
+        ));
+        let empty_session = ProtocolCaptureSession::create(&root).unwrap();
+        let empty_dir = empty_session.directory().to_path_buf();
+        assert!(empty_dir.is_dir());
+        Arc::try_unwrap(empty_session)
+            .ok()
+            .unwrap()
+            .cleanup_if_empty();
+        assert!(!empty_dir.exists());
+
+        let non_empty_session = ProtocolCaptureSession::create(&root).unwrap();
+        let non_empty_dir = non_empty_session.directory().to_path_buf();
+        non_empty_session
+            .store_handshake_url("wss://gate-obt.nqf.qq.com/prod/ws?platform=qq&code=kept-code")
+            .unwrap();
+        Arc::try_unwrap(non_empty_session)
+            .ok()
+            .unwrap()
+            .cleanup_if_empty();
+        assert!(non_empty_dir.is_dir());
+        assert!(non_empty_dir.join("connections.jsonl").is_file());
+
         fs::remove_dir_all(root).unwrap();
     }
 }

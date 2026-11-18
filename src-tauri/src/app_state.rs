@@ -1,15 +1,16 @@
 use crate::{
     certificates::CertificateManager,
     protocol_capture::{CaptureSummary, ProtocolCaptureSession},
-    proxy::{self, ProxyMode},
+    proxy::{self, ActiveProxyMode, CaptureArm, ProxyController},
     qq_identity::{self, LocalQqIdentity},
     qq_login_history::QqLoginHistory,
-    server_sync::{FriendGidCleanupResult, FriendGidSyncResult, ServerClient, SyncAccountInput},
+    server_sync::{ServerClient, SyncAccountInput},
     settings::{AppSettings, SettingsStore, SettingsView},
     status::StatusPayload,
     system_proxy::SystemProxyManager,
 };
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -19,19 +20,10 @@ use std::{
 use tauri::{AppHandle, Emitter};
 use tokio::{
     sync::{Mutex, mpsc},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
     time::{Duration, sleep},
 };
 use tokio_util::sync::CancellationToken;
-
-/// 这些阶段的状态描述的是某个具体账号，需要带上 target_qq。
-const ACCOUNT_PHASES: [&str; 5] = [
-    "waiting_login",
-    "code_captured",
-    "syncing",
-    "completed",
-    "identity_changed",
-];
 
 struct RuntimeState {
     starting: bool,
@@ -39,14 +31,18 @@ struct RuntimeState {
     task: Option<JoinHandle<()>>,
     capture_task: Option<JoinHandle<()>>,
     identity_task: Option<JoinHandle<()>>,
-    armed: Option<Arc<AtomicBool>>,
+    proxy_controller: Option<Arc<ProxyController>>,
+    capture_sender: Option<mpsc::Sender<proxy::CaptureEvent>>,
+    proxy_port: u16,
+    current_arm: Option<Arc<CaptureArm>>,
     capture_hint: &'static str,
-    capture_target: Option<String>,
-    last_code: Option<String>,
-    selected_qq_number: Option<String>,
-    locked_identity: Option<LocalQqIdentity>,
+    attempted_qqs: HashSet<String>,
+    dismissed_qqs: HashSet<String>,
+    codes_by_qq: HashMap<String, String>,
+    last_code_qq: Option<String>,
     identity_warning: Option<String>,
     protocol_session: Option<Arc<ProtocolCaptureSession>>,
+    sync_tasks: JoinSet<()>,
     status: StatusPayload,
 }
 
@@ -58,14 +54,18 @@ impl Default for RuntimeState {
             task: None,
             capture_task: None,
             identity_task: None,
-            armed: None,
+            proxy_controller: None,
+            capture_sender: None,
+            proxy_port: 8899,
+            current_arm: None,
             capture_hint: "",
-            capture_target: None,
-            last_code: None,
-            selected_qq_number: None,
-            locked_identity: None,
+            attempted_qqs: HashSet::new(),
+            dismissed_qqs: HashSet::new(),
+            codes_by_qq: HashMap::new(),
+            last_code_qq: None,
             identity_warning: None,
             protocol_session: None,
+            sync_tasks: JoinSet::new(),
             status: StatusPayload::idle(),
         }
     }
@@ -118,18 +118,157 @@ impl AppCore {
     }
 
     pub async fn bootstrap(&self) -> Result<(SettingsView, StatusPayload, Option<String>), String> {
-        let settings = self.settings.view()?;
         let runtime = self.runtime.lock().await;
+        let settings = self.settings.view()?;
         let warning = self.startup_warning.lock().await.clone();
         Ok((settings, runtime.status.clone(), warning))
     }
 
-    pub fn save_settings(
+    pub async fn save_settings(
         &self,
-        settings: AppSettings,
+        app: &AppHandle,
+        mut settings: AppSettings,
         token: Option<String>,
     ) -> Result<SettingsView, String> {
-        self.settings.save(settings, token)
+        let mut runtime = self.runtime.lock().await;
+        if runtime.cancellation.is_some() {
+            settings.proxy_port = runtime.proxy_port;
+            settings.protocol_capture = runtime.protocol_session.is_some();
+        }
+        let view = self.settings.save(settings, token)?;
+        Self::refresh_running_sync_settings(app, &mut runtime, &view.settings);
+        Ok(view)
+    }
+
+    pub async fn save_sync_options(
+        &self,
+        app: &AppHandle,
+        auto_sync: bool,
+        sync_official_friends: bool,
+    ) -> Result<SettingsView, String> {
+        let mut runtime = self.runtime.lock().await;
+        let view = self
+            .settings
+            .set_sync_options(auto_sync, sync_official_friends)?;
+        Self::refresh_running_sync_settings(app, &mut runtime, &view.settings);
+        Ok(view)
+    }
+
+    fn refresh_running_sync_settings(
+        app: &AppHandle,
+        runtime: &mut RuntimeState,
+        settings: &AppSettings,
+    ) {
+        if runtime.cancellation.is_none() {
+            return;
+        }
+        let hint = capture_hint(settings.auto_sync, settings.sync_official_friends);
+        runtime.capture_hint = hint;
+        if let Some(controller) = &runtime.proxy_controller {
+            controller
+                .set_capture_friend_gids(settings.auto_sync && settings.sync_official_friends);
+        }
+        if runtime.protocol_session.is_none()
+            && runtime.status.phase == "waiting_login"
+            && let Some(arm) = runtime
+                .current_arm
+                .as_ref()
+                .filter(|arm| arm.is_active())
+                .cloned()
+        {
+            let status = StatusPayload::new(
+                "waiting_login",
+                "等待农场登录",
+                waiting_login_detail(&arm.identity, hint),
+                false,
+            )
+            .with_target_qq(&arm.identity.qq_number);
+            emit_status(app, runtime, status);
+        }
+    }
+
+    pub async fn set_protocol_capture(
+        &self,
+        app: &AppHandle,
+        enabled: bool,
+    ) -> Result<SettingsView, String> {
+        let mut runtime = self.runtime.lock().await;
+        if runtime.starting {
+            return Err("正在启动代理，请稍候".to_owned());
+        }
+        if runtime.cancellation.is_none() {
+            let view = self.settings.set_protocol_capture(enabled)?;
+            if runtime.status.phase == "idle" {
+                emit_status(app, &mut runtime, idle_status(enabled));
+            }
+            return Ok(view);
+        }
+        let Some(controller) = runtime.proxy_controller.clone() else {
+            return Err("代理控制器状态异常，请停止后重试".to_owned());
+        };
+        let sender = runtime
+            .capture_sender
+            .clone()
+            .ok_or_else(|| "代理捕获通道状态异常，请停止后重试".to_owned())?;
+        let mut next_session = if enabled && runtime.protocol_session.is_none() {
+            Some(ProtocolCaptureSession::create(&self.protocol_capture_root)?)
+        } else {
+            None
+        };
+        let view = self
+            .settings
+            .set_protocol_capture(enabled)
+            .inspect_err(|_| {
+                if let Some(session) = next_session.take().and_then(Arc::into_inner) {
+                    session.cleanup_if_empty();
+                }
+            })?;
+        if let Some(session) = next_session {
+            if let Some(arm) = runtime.current_arm.take() {
+                arm.try_cancel();
+            }
+            runtime.identity_warning = None;
+            controller.set_mode(ActiveProxyMode::ProtocolCapture {
+                session: session.clone(),
+            });
+            runtime.protocol_session = Some(session.clone());
+            let port = runtime.proxy_port;
+            let status = StatusPayload::new(
+                "protocol_listening",
+                "协议模式",
+                protocol_listening_detail(port),
+                false,
+            )
+            .with_capture_directory(session.directory());
+            emit_status(app, &mut runtime, status);
+        } else if !enabled && let Some(prev_session) = runtime.protocol_session.take() {
+            let hint = capture_hint(view.settings.auto_sync, view.settings.sync_official_friends);
+            runtime.capture_hint = hint;
+            runtime.current_arm = None;
+            runtime.identity_warning = None;
+            controller.set_mode(ActiveProxyMode::CaptureCode {
+                captured: sender,
+                arm: None,
+                capture_friend_gids: view.settings.auto_sync && view.settings.sync_official_friends,
+                diagnostics_path: Some(self.diagnostics_path.clone()),
+            });
+            let summary = prev_session.summary();
+            if summary.connection_count == 0 && summary.message_count == 0 {
+                if let Ok(owned) = Arc::try_unwrap(prev_session) {
+                    owned.cleanup_if_empty();
+                }
+                emit_status(app, &mut runtime, ready_status());
+            } else {
+                let detail = format!(
+                    "已退出协议模式 · {} 个连接 · {} 条消息 · 选择账号继续同步",
+                    summary.connection_count, summary.message_count
+                );
+                let status = StatusPayload::new("ready", "代理运行中", detail, false)
+                    .with_capture_directory(&summary.directory);
+                emit_status(app, &mut runtime, status);
+            }
+        }
+        Ok(view)
     }
 
     pub fn stored_token(&self) -> Result<Option<String>, String> {
@@ -143,11 +282,7 @@ impl AppCore {
     pub async fn start_capture(self: &Arc<Self>, app: AppHandle) -> Result<(), String> {
         let settings = self.settings.load()?;
         self.begin_start().await?;
-        let result = if settings.protocol_capture {
-            self.start_protocol_capture(app, settings).await
-        } else {
-            self.start_code_capture(app, settings, None).await
-        };
+        let result = self.start_proxy_session(app, settings, None).await;
         self.runtime.lock().await.starting = false;
         result
     }
@@ -168,7 +303,9 @@ impl AppCore {
             return Ok(());
         }
         self.begin_start().await?;
-        let result = self.start_code_capture(app, settings, Some(identity)).await;
+        let result = self
+            .start_proxy_session(app, settings, Some(identity))
+            .await;
         self.runtime.lock().await.starting = false;
         result
     }
@@ -183,133 +320,155 @@ impl AppCore {
             return Ok(false);
         }
         if runtime.protocol_session.is_some() {
-            return Err("协议模式运行中，请先停止".to_owned());
+            return Err("协议模式运行中，请先关闭协议模式".to_owned());
         }
-        let Some(armed) = runtime.armed.clone() else {
+        let Some(controller) = runtime.proxy_controller.clone() else {
             return Err("代理状态异常，请停止后重试".to_owned());
         };
-        if capture_in_progress(runtime.status.phase, &armed) {
-            return Err("正在处理上一个账号的登录，请稍候".to_owned());
+        if let Some(previous_arm) = runtime.current_arm.take() {
+            previous_arm.try_cancel();
         }
-        runtime.selected_qq_number = Some(identity.qq_number.clone());
-        runtime.locked_identity = Some(identity.clone());
+        let arm = CaptureArm::new(identity.clone());
+        controller.set_arm(Some(arm.clone()))?;
+        runtime.current_arm = Some(arm);
+        runtime.dismissed_qqs.remove(&identity.qq_number);
         runtime.identity_warning = None;
-        runtime.capture_target = None;
-        runtime.last_code = None;
-        armed.store(true, Ordering::SeqCst);
         let status = StatusPayload::new(
             "waiting_login",
             "等待农场登录",
             waiting_login_detail(identity, runtime.capture_hint),
             false,
-        );
+        )
+        .with_target_qq(&identity.qq_number);
         emit_status(app, &mut runtime, status);
         Ok(true)
     }
 
     pub async fn cancel_account_sync(&self, app: &AppHandle) -> Result<(), String> {
         let mut runtime = self.runtime.lock().await;
-        if runtime.status.phase != "waiting_login" {
-            return Ok(());
-        }
-        let Some(armed) = runtime.armed.clone() else {
+        let Some(arm) = runtime.current_arm.as_ref() else {
             return Ok(());
         };
-        if !armed.swap(false, Ordering::SeqCst) {
+        if !arm.try_cancel() {
             return Err("已拦截到农场登录，正在处理，请稍候".to_owned());
         }
-        runtime.locked_identity = None;
+        let qq_number = arm.identity.qq_number.clone();
+        runtime.current_arm = None;
+        if let Some(controller) = &runtime.proxy_controller {
+            let _ = controller.set_arm(None);
+        }
+        runtime.dismissed_qqs.insert(qq_number);
         runtime.identity_warning = None;
         emit_status(app, &mut runtime, ready_status());
         Ok(())
     }
 
-    async fn start_code_capture(
+    async fn start_proxy_session(
         self: &Arc<Self>,
         app: AppHandle,
         settings: AppSettings,
-        identity: Option<LocalQqIdentity>,
+        mut initial_identity: Option<LocalQqIdentity>,
     ) -> Result<(), String> {
         let preparing_detail = format!("代理端口 {}", settings.proxy_port);
         let (tls, listener) = self
             .prepare_proxy_listener(&app, settings.proxy_port, &preparing_detail)
             .await?;
+
+        let protocol_session = if settings.protocol_capture {
+            match ProtocolCaptureSession::create(&self.protocol_capture_root) {
+                Ok(session) => Some(session),
+                Err(error) => {
+                    let _ = self.cleanup_certificate().await;
+                    return Err(self.record_failure(&app, error, false).await);
+                }
+            }
+        } else {
+            None
+        };
+
+        // 从「启动代理」进入普通模式时，若当前恰有 1 个在线 QQ 且满足自动同步条件，直接自动布防。
+        if protocol_session.is_none()
+            && initial_identity.is_none()
+            && self.validate_sync_settings(&settings).is_ok()
+            && let Ok(Ok(identities)) = tokio::time::timeout(
+                Duration::from_millis(800),
+                qq_identity::detect_all_async(self.qq_login_history.clone()),
+            )
+            .await
+            && identities.len() == 1
+        {
+            initial_identity = identities.into_iter().next();
+        }
+
         let cancellation = CancellationToken::new();
         let identity_cancellation = cancellation.clone();
-        let armed = Arc::new(AtomicBool::new(identity.is_some()));
-        let (sender, receiver) = mpsc::channel(4);
+        let (sender, receiver) = mpsc::channel(16);
         let _ = std::fs::remove_file(&self.diagnostics_path);
-        let mode = ProxyMode::CaptureCode {
-            captured: sender,
-            armed: armed.clone(),
-            capture_friend_gids: settings.auto_sync && settings.sync_official_friends,
-            diagnostics_path: Some(self.diagnostics_path.clone()),
-        };
-        let task = tokio::spawn(proxy::run(listener, tls, cancellation.clone(), mode));
-        let hint = capture_hint(settings.auto_sync, settings.sync_official_friends);
-        self.store_transport(cancellation, task, identity.clone(), armed, hint)
-            .await;
 
-        if let Err(error) = self.enable_system_proxy(settings.proxy_port).await {
-            let _ = self.stop_transport().await;
-            return Err(self.record_failure(&app, error, false).await);
-        }
-        let status = match identity {
-            Some(identity) => StatusPayload::new(
-                "waiting_login",
-                "等待农场登录",
-                waiting_login_detail(&identity, hint),
-                false,
-            ),
-            None => ready_status(),
-        };
-        self.publish(&app, status).await;
-        self.start_identity_monitor(app.clone(), identity_cancellation)
-            .await;
-        self.spawn_capture_handler(app, receiver).await;
-        Ok(())
-    }
-
-    async fn start_protocol_capture(
-        self: &Arc<Self>,
-        app: AppHandle,
-        settings: AppSettings,
-    ) -> Result<(), String> {
-        let preparing_detail = format!("代理端口 {}", settings.proxy_port);
-        let (tls, listener) = self
-            .prepare_proxy_listener(&app, settings.proxy_port, &preparing_detail)
-            .await?;
-        let session = match ProtocolCaptureSession::create(&self.protocol_capture_root) {
-            Ok(session) => session,
-            Err(error) => {
-                let _ = self.cleanup_certificate().await;
-                return Err(self.record_failure(&app, error, false).await);
+        let initial_arm = initial_identity.as_ref().cloned().map(CaptureArm::new);
+        let initial_mode = if let Some(session) = protocol_session.clone() {
+            ActiveProxyMode::ProtocolCapture { session }
+        } else {
+            ActiveProxyMode::CaptureCode {
+                captured: sender.clone(),
+                arm: initial_arm.clone(),
+                capture_friend_gids: settings.auto_sync && settings.sync_official_friends,
+                diagnostics_path: Some(self.diagnostics_path.clone()),
             }
         };
-        let cancellation = CancellationToken::new();
-        let mode = ProxyMode::ProtocolCapture {
-            session: session.clone(),
-        };
-        let task = tokio::spawn(proxy::run(listener, tls, cancellation.clone(), mode));
-        self.store_protocol_transport(cancellation, task, session.clone())
-            .await;
+        let controller = ProxyController::new(initial_mode);
+        let task = tokio::spawn(proxy::run(
+            listener,
+            tls,
+            cancellation.clone(),
+            controller.clone(),
+        ));
+        let hint = capture_hint(settings.auto_sync, settings.sync_official_friends);
+        self.store_session_transport(
+            cancellation,
+            task,
+            controller,
+            sender,
+            settings.proxy_port,
+            initial_arm,
+            hint,
+            protocol_session.clone(),
+        )
+        .await;
 
         if let Err(error) = self.enable_system_proxy(settings.proxy_port).await {
             let _ = self.stop_transport().await;
-            self.take_protocol_session().await;
+            if let Some(session) = self.take_protocol_session().await
+                && let Ok(owned) = Arc::try_unwrap(session)
+            {
+                owned.cleanup_if_empty();
+            }
             return Err(self.record_failure(&app, error, false).await);
         }
-        self.publish(
-            &app,
+
+        let status = if let Some(session) = protocol_session {
             StatusPayload::new(
                 "protocol_listening",
                 "协议模式",
                 protocol_listening_detail(settings.proxy_port),
                 false,
             )
-            .with_capture_directory(session.directory()),
-        )
-        .await;
+            .with_capture_directory(session.directory())
+        } else if let Some(identity) = initial_identity {
+            StatusPayload::new(
+                "waiting_login",
+                "等待农场登录",
+                waiting_login_detail(&identity, hint),
+                false,
+            )
+            .with_target_qq(identity.qq_number)
+        } else {
+            ready_status()
+        };
+        self.publish(&app, status).await;
+        self.start_identity_monitor(app.clone(), identity_cancellation)
+            .await;
+        self.spawn_capture_handler(app, receiver).await;
         Ok(())
     }
 
@@ -342,7 +501,7 @@ impl AppCore {
     pub async fn stop_capture(&self, app: &AppHandle) -> Result<(), String> {
         let protocol_session = self.take_protocol_session().await;
         self.stop_transport().await?;
-        self.clear_capture_identity().await;
+        self.clear_session_identity().await;
         let status = if let Some(session) = protocol_session {
             let summary = session.summary();
             StatusPayload::new(
@@ -362,7 +521,7 @@ impl AppCore {
     pub async fn cleanup_network(&self, app: &AppHandle) -> Result<(), String> {
         let protocol_session = self.take_protocol_session().await;
         self.stop_transport().await?;
-        self.clear_capture_identity().await;
+        self.clear_session_identity().await;
         let status = if let Some(session) = protocol_session {
             let summary = session.summary();
             StatusPayload::new(
@@ -384,12 +543,20 @@ impl AppCore {
         Ok(())
     }
 
-    pub async fn captured_code(&self) -> Result<String, String> {
-        self.runtime
-            .lock()
-            .await
-            .last_code
-            .clone()
+    pub async fn captured_code(&self, qq_number: Option<&str>) -> Result<String, String> {
+        let runtime = self.runtime.lock().await;
+        if let Some(qq) = qq_number.map(str::trim).filter(|value| !value.is_empty()) {
+            return runtime
+                .codes_by_qq
+                .get(qq)
+                .cloned()
+                .ok_or_else(|| format!("QQ {qq} 当前没有可复制的 Code"));
+        }
+        runtime
+            .last_code_qq
+            .as_deref()
+            .and_then(|qq| runtime.codes_by_qq.get(qq))
+            .cloned()
             .ok_or_else(|| "当前没有可复制的 Code".to_owned())
     }
 
@@ -421,9 +588,19 @@ impl AppCore {
         let task = tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
                 match event {
-                    proxy::CaptureEvent::Intercepted => core.handle_intercepted(&app).await,
-                    proxy::CaptureEvent::Captured(captured) => {
-                        core.handle_captured_login(&app, captured).await;
+                    proxy::CaptureEvent::Intercepted { arm } => {
+                        core.handle_intercepted(&app, arm).await;
+                    }
+                    proxy::CaptureEvent::Captured { arm, login } => {
+                        let core_for_sync = core.clone();
+                        let app_for_sync = app.clone();
+                        let mut runtime = core.runtime.lock().await;
+                        while runtime.sync_tasks.try_join_next().is_some() {}
+                        runtime.sync_tasks.spawn(async move {
+                            core_for_sync
+                                .handle_captured_login(&app_for_sync, arm, login)
+                                .await;
+                        });
                     }
                 }
             }
@@ -431,45 +608,30 @@ impl AppCore {
         runtime.capture_task = Some(task);
     }
 
-    async fn send_friend_gids(
-        &self,
-        account_id: &str,
-        gids: &[String],
-    ) -> Result<FriendGidSyncResult, String> {
-        let settings = self.settings.load()?;
-        let token = self
-            .settings
-            .token()?
-            .ok_or_else(|| "后台登录 Token 已不存在".to_owned())?;
-        ServerClient::new()?
-            .batch_add_friend_gids(&settings.server_url, &token, account_id, gids)
-            .await
-    }
-
-    async fn remove_friend_gids(
-        &self,
-        account_id: &str,
-        gids: &[String],
-    ) -> Result<FriendGidCleanupResult, String> {
-        let settings = self.settings.load()?;
-        let token = self
-            .settings
-            .token()?
-            .ok_or_else(|| "后台登录 Token 已不存在".to_owned())?;
-        ServerClient::new()?
-            .batch_remove_friend_gids(&settings.server_url, &token, account_id, gids)
-            .await
-    }
-
-    async fn handle_intercepted(&self, app: &AppHandle) {
+    async fn handle_intercepted(&self, app: &AppHandle, arm: Arc<CaptureArm>) {
         let mut runtime = self.runtime.lock().await;
-        runtime.capture_target = runtime.selected_qq_number.clone();
-        let status = StatusPayload::new("code_captured", "已获取 Code", "正在读取登录信息", false);
+        let qq = arm.identity.qq_number.clone();
+        runtime.attempted_qqs.insert(qq.clone());
+        if runtime
+            .current_arm
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &arm))
+        {
+            runtime.current_arm = None;
+        }
+        let status = StatusPayload::new("code_captured", "已获取 Code", "正在读取登录信息", false)
+            .with_target_qq(qq);
         emit_status(app, &mut runtime, status);
     }
 
-    async fn handle_captured_login(&self, app: &AppHandle, captured: proxy::CapturedLogin) {
-        self.set_code(Some(captured.code.clone())).await;
+    async fn handle_captured_login(
+        &self,
+        app: &AppHandle,
+        arm: Arc<CaptureArm>,
+        captured: proxy::CapturedLogin,
+    ) {
+        let qq = arm.identity.qq_number.clone();
+        self.set_code(&qq, Some(captured.code.clone())).await;
         let captured_detail = if captured.friend_gids.is_empty() {
             "Code 已获取\n正在确认 QQ".to_owned()
         } else {
@@ -480,23 +642,34 @@ impl AppCore {
         };
         self.publish(
             app,
-            StatusPayload::new("code_captured", "已获取 Code", captured_detail, true),
+            StatusPayload::new("code_captured", "已获取 Code", captured_detail, true)
+                .with_target_qq(&qq),
         )
         .await;
-        self.revalidate_capture_identity().await;
-        let settings = match self.settings.load() {
-            Ok(settings) => settings,
+
+        let verification = self.revalidate_identity_for(&arm.identity).await;
+        let (settings, token) = match self.settings.load_for_sync() {
+            Ok(settings_and_token) => settings_and_token,
             Err(error) => {
-                self.record_failure(app, error, true).await;
+                self.record_failure_for(app, &qq, error, true).await;
                 return;
             }
         };
         if settings.auto_sync {
-            self.sync_captured_login(app, &settings, &captured).await;
+            match verification {
+                Ok(verified_identity) => {
+                    self.sync_captured_login(app, &settings, token, &verified_identity, &captured)
+                        .await;
+                }
+                Err(reason) => {
+                    self.publish_identity_blocked(app, &qq, &reason).await;
+                }
+            }
         } else {
             self.publish(
                 app,
-                StatusPayload::new("completed", "Code 可复制", "可继续选择其他账号", true),
+                StatusPayload::new("completed", "Code 可复制", "可继续选择其他账号", true)
+                    .with_target_qq(&qq),
             )
             .await;
         }
@@ -506,48 +679,65 @@ impl AppCore {
         &self,
         app: &AppHandle,
         settings: &AppSettings,
+        token: Option<String>,
+        locked_identity: &LocalQqIdentity,
         captured: &proxy::CapturedLogin,
     ) {
-        let (locked_identity, identity_warning) = self.capture_identity().await;
-        let Some(locked_identity) = locked_identity else {
-            self.publish_identity_blocked(
-                app,
-                identity_warning
-                    .as_deref()
-                    .unwrap_or("捕获 Code 时无法确认当前 QQ"),
-            )
-            .await;
-            return;
-        };
+        let qq = &locked_identity.qq_number;
         self.publish(
             app,
-            StatusPayload::new("syncing", "正在同步", "Code 已获取\n正在确认远程账号", true),
+            StatusPayload::new("syncing", "正在同步", "Code 已获取\n正在确认远程账号", true)
+                .with_target_qq(qq),
         )
         .await;
-        let result = self
-            .sync_code(settings, &captured.code, &locked_identity)
-            .await;
+        let result = async {
+            let token = token.ok_or_else(|| "未配置服务器 Token".to_owned())?;
+            let client = ServerClient::new()?;
+            let profile = client
+                .sync_code(
+                    &settings.server_url,
+                    &token,
+                    SyncAccountInput {
+                        account_name: &settings.account_name,
+                        qq_number: qq,
+                        nickname: &locked_identity.nickname,
+                        avatar_url: &locked_identity.avatar_url,
+                        code: &captured.code,
+                    },
+                )
+                .await?;
+            Ok::<_, String>((client, token, profile))
+        }
+        .await;
         match result {
-            Ok(mut profile) => {
+            Ok((client, token, mut profile)) => {
                 apply_captured_identity(&mut profile, captured);
-                self.set_code(None).await;
-                let mut detail = sync_completion_detail(&profile, &locked_identity);
+                self.set_code(qq, None).await;
+                let mut detail = sync_completion_detail(&profile, locked_identity);
                 if settings.sync_official_friends {
                     detail.push_str(
                         &self
-                            .sync_official_friend_gids(app, &profile, captured)
+                            .sync_official_friend_gids(
+                                app,
+                                qq,
+                                &profile,
+                                captured,
+                                &client,
+                                (&settings.server_url, &token),
+                            )
                             .await,
                     );
                 }
                 self.publish(
                     app,
                     StatusPayload::new("completed", "同步完成", detail, false)
-                        .with_profile(profile),
+                        .with_profile(profile)
+                        .with_target_qq(qq),
                 )
                 .await;
             }
             Err(error) => {
-                self.record_failure(app, format!("同步失败：{error}\nCode 可复制"), true)
+                self.record_failure_for(app, qq, format!("同步失败：{error}\nCode 可复制"), true)
                     .await;
             }
         }
@@ -556,8 +746,11 @@ impl AppCore {
     async fn sync_official_friend_gids(
         &self,
         app: &AppHandle,
+        qq_number: &str,
         profile: &crate::server_sync::AccountProfile,
         captured: &proxy::CapturedLogin,
+        client: &ServerClient,
+        (server_url, token): (&str, &str),
     ) -> String {
         if captured.friend_gids.is_empty() {
             let warning = captured
@@ -577,19 +770,21 @@ impl AppCore {
         self.publish(
             app,
             StatusPayload::new("syncing", "正在同步好友", progress_detail, false)
-                .with_profile(profile.clone()),
+                .with_profile(profile.clone())
+                .with_target_qq(qq_number),
         )
         .await;
 
         let own_gids = [own_gid.to_owned()];
-        let cleanup_result = self
-            .remove_friend_gids(&profile.account_id, &own_gids)
+        let cleanup_result = client
+            .batch_remove_friend_gids(server_url, token, &profile.account_id, &own_gids)
             .await;
         let add_result = if friend_gids.is_empty() {
             None
         } else {
             Some(
-                self.send_friend_gids(&profile.account_id, &friend_gids)
+                client
+                    .batch_add_friend_gids(server_url, token, &profile.account_id, &friend_gids)
                     .await,
             )
         };
@@ -620,7 +815,7 @@ impl AppCore {
         }
     }
 
-    async fn publish_identity_blocked(&self, app: &AppHandle, reason: &str) {
+    async fn publish_identity_blocked(&self, app: &AppHandle, qq_number: &str, reason: &str) {
         self.publish(
             app,
             StatusPayload::new(
@@ -628,34 +823,10 @@ impl AppCore {
                 "未同步",
                 format!("QQ 已变化：{reason}\nCode 可复制"),
                 true,
-            ),
+            )
+            .with_target_qq(qq_number),
         )
         .await;
-    }
-
-    async fn sync_code(
-        &self,
-        settings: &AppSettings,
-        code: &str,
-        locked_identity: &LocalQqIdentity,
-    ) -> Result<crate::server_sync::AccountProfile, String> {
-        let token = self
-            .settings
-            .token()?
-            .ok_or_else(|| "未配置服务器 Token".to_owned())?;
-        ServerClient::new()?
-            .sync_code(
-                &settings.server_url,
-                &token,
-                SyncAccountInput {
-                    account_name: &settings.account_name,
-                    qq_number: &locked_identity.qq_number,
-                    nickname: &locked_identity.nickname,
-                    avatar_url: &locked_identity.avatar_url,
-                    code,
-                },
-            )
-            .await
     }
 
     async fn begin_start(&self) -> Result<(), String> {
@@ -686,46 +857,34 @@ impl AppCore {
         Ok(())
     }
 
-    async fn store_transport(
+    #[allow(clippy::too_many_arguments)]
+    async fn store_session_transport(
         &self,
         cancellation: CancellationToken,
         task: JoinHandle<()>,
-        identity: Option<LocalQqIdentity>,
-        armed: Arc<AtomicBool>,
+        proxy_controller: Arc<ProxyController>,
+        capture_sender: mpsc::Sender<proxy::CaptureEvent>,
+        proxy_port: u16,
+        current_arm: Option<Arc<CaptureArm>>,
         capture_hint: &'static str,
-    ) {
-        let mut runtime = self.runtime.lock().await;
-        runtime.cancellation = Some(cancellation);
-        runtime.task = Some(task);
-        runtime.identity_task = None;
-        runtime.armed = Some(armed);
-        runtime.capture_hint = capture_hint;
-        runtime.capture_target = None;
-        runtime.last_code = None;
-        runtime.selected_qq_number = identity.as_ref().map(|identity| identity.qq_number.clone());
-        runtime.locked_identity = identity;
-        runtime.identity_warning = None;
-        runtime.protocol_session = None;
-    }
-
-    async fn store_protocol_transport(
-        &self,
-        cancellation: CancellationToken,
-        task: JoinHandle<()>,
-        session: Arc<ProtocolCaptureSession>,
+        protocol_session: Option<Arc<ProtocolCaptureSession>>,
     ) {
         let mut runtime = self.runtime.lock().await;
         runtime.cancellation = Some(cancellation);
         runtime.task = Some(task);
         runtime.capture_task = None;
         runtime.identity_task = None;
-        runtime.armed = None;
-        runtime.capture_target = None;
-        runtime.last_code = None;
-        runtime.selected_qq_number = None;
-        runtime.locked_identity = None;
+        runtime.proxy_controller = Some(proxy_controller);
+        runtime.capture_sender = Some(capture_sender);
+        runtime.proxy_port = proxy_port;
+        runtime.current_arm = current_arm;
+        runtime.capture_hint = capture_hint;
+        runtime.attempted_qqs.clear();
+        runtime.dismissed_qqs.clear();
+        runtime.codes_by_qq.clear();
+        runtime.last_code_qq = None;
         runtime.identity_warning = None;
-        runtime.protocol_session = Some(session);
+        runtime.protocol_session = protocol_session;
     }
 
     async fn take_protocol_session(&self) -> Option<Arc<ProtocolCaptureSession>> {
@@ -736,8 +895,11 @@ impl AppCore {
         let _stopping = self.transport_stop.lock().await;
         let (cancellation, task, capture_task, identity_task) = {
             let mut runtime = self.runtime.lock().await;
-            runtime.armed = None;
-            runtime.capture_target = None;
+            if let Some(arm) = runtime.current_arm.take() {
+                arm.try_cancel();
+            }
+            runtime.proxy_controller = None;
+            runtime.capture_sender = None;
             (
                 runtime.cancellation.take(),
                 runtime.task.take(),
@@ -756,6 +918,8 @@ impl AppCore {
             task.abort();
             let _ = task.await;
         }
+        let mut sync_tasks = std::mem::take(&mut self.runtime.lock().await.sync_tasks);
+        sync_tasks.shutdown().await;
         if let Some(task) = task {
             let _ = task.await;
         }
@@ -773,63 +937,179 @@ impl AppCore {
                 if cancellation.is_cancelled() {
                     break;
                 }
-                match qq_identity::detect_stable_all_async(core.qq_login_history.clone()).await {
-                    Ok(identities) => core.adopt_waiting_identities(&app, identities).await,
-                    Err(error) => {
-                        core.mark_waiting_identity_unconfirmed(&app, error).await;
+                let skip_scan = {
+                    let runtime = core.runtime.lock().await;
+                    runtime.cancellation.is_none() || runtime.protocol_session.is_some()
+                };
+                if !skip_scan {
+                    match qq_identity::detect_stable_all_async(core.qq_login_history.clone()).await
+                    {
+                        Ok(identities) => core.reconcile_identities(&app, identities).await,
+                        Err(error) => core.handle_identity_monitor_error(&app, error).await,
                     }
                 }
                 tokio::select! {
                     _ = cancellation.cancelled() => break,
-                    _ = sleep(Duration::from_millis(500)) => {}
+                    _ = sleep(Duration::from_millis(800)) => {}
                 }
             }
         });
         self.runtime.lock().await.identity_task = Some(task);
     }
 
-    async fn adopt_waiting_identities(&self, app: &AppHandle, identities: Vec<LocalQqIdentity>) {
-        let selected_qq_number = self.runtime.lock().await.selected_qq_number.clone();
-        match choose_waiting_identity(&identities, selected_qq_number.as_deref()) {
-            Ok(identity) => self.adopt_waiting_identity(app, identity).await,
-            Err(error) => self.mark_waiting_identity_unconfirmed(app, error).await,
+    async fn reconcile_identities(&self, app: &AppHandle, identities: Vec<LocalQqIdentity>) {
+        let needs_auto_arm_check = {
+            let runtime = self.runtime.lock().await;
+            if runtime.cancellation.is_none() || runtime.protocol_session.is_some() {
+                return;
+            }
+            should_check_auto_arm(
+                &identities,
+                runtime.current_arm.as_deref(),
+                &runtime.attempted_qqs,
+                &runtime.dismissed_qqs,
+            )
+        };
+        let can_auto_arm = if needs_auto_arm_check {
+            self.settings
+                .load()
+                .ok()
+                .is_some_and(|settings| self.validate_sync_settings(&settings).is_ok())
+        } else {
+            false
+        };
+
+        let mut runtime = self.runtime.lock().await;
+        if runtime.cancellation.is_none() || runtime.protocol_session.is_some() {
+            return;
+        }
+        let Some(controller) = runtime.proxy_controller.clone() else {
+            return;
+        };
+
+        if let Some(current_arm) = runtime.current_arm.clone() {
+            if !current_arm.is_active() {
+                return;
+            }
+            if let Some(refreshed) = identities
+                .iter()
+                .find(|id| id.qq_number == current_arm.identity.qq_number)
+            {
+                if refreshed.nickname != current_arm.identity.nickname
+                    || refreshed.avatar_url != current_arm.identity.avatar_url
+                {
+                    current_arm.try_cancel();
+                    let next_arm = CaptureArm::new(refreshed.clone());
+                    if controller.set_arm(Some(next_arm.clone())).is_ok() {
+                        runtime.current_arm = Some(next_arm);
+                        let status = StatusPayload::new(
+                            "waiting_login",
+                            "等待农场登录",
+                            waiting_login_detail(refreshed, runtime.capture_hint),
+                            false,
+                        )
+                        .with_target_qq(&refreshed.qq_number);
+                        emit_status(app, &mut runtime, status);
+                    }
+                }
+                runtime.identity_warning = None;
+                return;
+            }
+
+            current_arm.try_cancel();
+            if can_auto_arm
+                && let Some(next_identity) = next_single_window_candidate(
+                    &identities,
+                    &runtime.attempted_qqs,
+                    &runtime.dismissed_qqs,
+                    false,
+                )
+            {
+                let next_arm = CaptureArm::new(next_identity.clone());
+                if controller.set_arm(Some(next_arm.clone())).is_ok() {
+                    runtime.current_arm = Some(next_arm);
+                    runtime.identity_warning = None;
+                    let status = StatusPayload::new(
+                        "waiting_login",
+                        "等待农场登录",
+                        waiting_login_detail(&next_identity, runtime.capture_hint),
+                        false,
+                    )
+                    .with_target_qq(&next_identity.qq_number);
+                    emit_status(app, &mut runtime, status);
+                    return;
+                }
+            }
+
+            runtime.current_arm = None;
+            let _ = controller.set_arm(None);
+            runtime.identity_warning = None;
+            let detail = format!(
+                "QQ {} 已退出登录，请重新选择账号",
+                current_arm.identity.qq_number
+            );
+            emit_status(
+                app,
+                &mut runtime,
+                StatusPayload::new("ready", "代理运行中", detail, false),
+            );
+            return;
+        }
+
+        if can_auto_arm
+            && let Some(candidate) = next_single_window_candidate(
+                &identities,
+                &runtime.attempted_qqs,
+                &runtime.dismissed_qqs,
+                true,
+            )
+        {
+            let next_arm = CaptureArm::new(candidate.clone());
+            if controller.set_arm(Some(next_arm.clone())).is_ok() {
+                runtime.current_arm = Some(next_arm);
+                runtime.identity_warning = None;
+                let status = StatusPayload::new(
+                    "waiting_login",
+                    "等待农场登录",
+                    waiting_login_detail(&candidate, runtime.capture_hint),
+                    false,
+                )
+                .with_target_qq(&candidate.qq_number);
+                emit_status(app, &mut runtime, status);
+            }
         }
     }
 
-    async fn adopt_waiting_identity(&self, app: &AppHandle, identity: LocalQqIdentity) {
+    async fn handle_identity_monitor_error(&self, app: &AppHandle, error: String) {
+        if !error.contains("未找到 QQ 主窗口") {
+            return;
+        }
         let mut runtime = self.runtime.lock().await;
-        if runtime.status.phase != "waiting_login" {
+        if runtime.cancellation.is_none() || runtime.protocol_session.is_some() {
             return;
         }
-        let (changed, _) = replace_locked_identity(&mut runtime.locked_identity, &identity);
-        runtime.selected_qq_number = Some(identity.qq_number.clone());
-        runtime.identity_warning = None;
-        if !changed {
+        let Some(current_arm) = runtime.current_arm.as_ref() else {
+            return;
+        };
+        if !current_arm.is_active() {
             return;
         }
-        let detail = waiting_login_detail(&identity, runtime.capture_hint);
-        let status = StatusPayload::new("waiting_login", "等待农场登录", detail, false);
-        emit_status(app, &mut runtime, status);
-    }
-
-    async fn mark_waiting_identity_unconfirmed(&self, app: &AppHandle, error: String) {
-        let mut runtime = self.runtime.lock().await;
-        if runtime.status.phase != "waiting_login" {
-            return;
+        let arm = runtime.current_arm.take().unwrap();
+        arm.try_cancel();
+        if let Some(controller) = &runtime.proxy_controller {
+            let _ = controller.set_arm(None);
         }
-        let changed = runtime.locked_identity.take().is_some()
-            || runtime.identity_warning.as_deref() != Some(error.as_str());
-        runtime.identity_warning = Some(error.clone());
-        if !changed {
-            return;
-        }
-        let status = StatusPayload::new(
-            "waiting_login",
-            "等待确认 QQ",
-            format!("代理仍在运行\n{error}"),
-            false,
+        runtime.identity_warning = Some(error);
+        emit_status(
+            app,
+            &mut runtime,
+            StatusPayload::new(
+                "ready",
+                "代理运行中",
+                "QQ 主窗口已关闭，请登录 QQ 后选择账号",
+                false,
+            ),
         );
-        emit_status(app, &mut runtime, status);
     }
 
     async fn prepare_certificate(&self) -> Result<Arc<rustls::ServerConfig>, String> {
@@ -858,59 +1138,52 @@ impl AppCore {
         })
     }
 
-    async fn set_code(&self, code: Option<String>) {
-        self.runtime.lock().await.last_code = code;
+    async fn set_code(&self, qq_number: &str, code: Option<String>) {
+        let mut runtime = self.runtime.lock().await;
+        match code {
+            Some(code) => {
+                runtime.codes_by_qq.insert(qq_number.to_owned(), code);
+                runtime.last_code_qq = Some(qq_number.to_owned());
+            }
+            None => {
+                runtime.codes_by_qq.remove(qq_number);
+                if runtime.last_code_qq.as_deref() == Some(qq_number) {
+                    runtime.last_code_qq = runtime.codes_by_qq.keys().next().cloned();
+                }
+            }
+        }
     }
 
     async fn has_code(&self) -> bool {
-        self.runtime.lock().await.last_code.is_some()
+        !self.runtime.lock().await.codes_by_qq.is_empty()
     }
 
-    async fn capture_identity(&self) -> (Option<LocalQqIdentity>, Option<String>) {
-        let runtime = self.runtime.lock().await;
-        (
-            runtime.locked_identity.clone(),
-            runtime.identity_warning.clone(),
-        )
-    }
-
-    async fn clear_capture_identity(&self) {
+    async fn clear_session_identity(&self) {
         let mut runtime = self.runtime.lock().await;
-        runtime.locked_identity = None;
+        runtime.current_arm = None;
         runtime.identity_warning = None;
     }
 
-    async fn revalidate_capture_identity(&self) {
-        let (locked_identity, _) = self.capture_identity().await;
-        let Some(locked_identity) = locked_identity else {
-            return;
-        };
-        let result = detect_selected_qq_with_retry(
+    async fn revalidate_identity_for(
+        &self,
+        locked_identity: &LocalQqIdentity,
+    ) -> Result<LocalQqIdentity, String> {
+        match detect_selected_qq_with_retry(
             self.qq_login_history.clone(),
             &locked_identity.qq_number,
             2,
         )
-        .await;
-        let mut runtime = self.runtime.lock().await;
-        match result {
-            Ok(current) if current.qq_number == locked_identity.qq_number => {
-                runtime.locked_identity = Some(current);
-                runtime.identity_warning = None;
-            }
-            Ok(current) => {
-                runtime.locked_identity = None;
-                runtime.identity_warning = Some(format!(
-                    "捕获前锁定 QQ {}，捕获 Code 后检测到 QQ {}，账号已变化",
-                    locked_identity.qq_number, current.qq_number
-                ));
-            }
-            Err(error) => {
-                runtime.locked_identity = None;
-                runtime.identity_warning = Some(format!(
-                    "捕获 Code 后无法再次确认 QQ {}：{}",
-                    locked_identity.qq_number, error
-                ));
-            }
+        .await
+        {
+            Ok(current) if current.qq_number == locked_identity.qq_number => Ok(current),
+            Ok(current) => Err(format!(
+                "捕获前锁定 QQ {}，捕获 Code 后检测到 QQ {}，账号已变化",
+                locked_identity.qq_number, current.qq_number
+            )),
+            Err(error) => Err(format!(
+                "捕获 Code 后无法再次确认 QQ {}：{}",
+                locked_identity.qq_number, error
+            )),
         }
     }
 
@@ -928,46 +1201,100 @@ impl AppCore {
         error
     }
 
+    async fn record_failure_for(
+        &self,
+        app: &AppHandle,
+        qq_number: &str,
+        error: String,
+        code_available: bool,
+    ) -> String {
+        self.publish(
+            app,
+            StatusPayload::new("error", "操作失败", &error, code_available)
+                .with_target_qq(qq_number),
+        )
+        .await;
+        error
+    }
+
     pub fn mark_exiting(&self) -> bool {
         self.exiting.swap(true, Ordering::SeqCst)
     }
 }
 
-fn replace_locked_identity(
-    locked_identity: &mut Option<LocalQqIdentity>,
-    identity: &LocalQqIdentity,
-) -> (bool, Option<String>) {
-    let previous = locked_identity
-        .as_ref()
-        .map(|current| current.qq_number.clone());
-    let changed = previous.as_deref() != Some(identity.qq_number.as_str());
-    *locked_identity = Some(identity.clone());
-    (changed, previous)
+fn should_check_auto_arm(
+    identities: &[LocalQqIdentity],
+    current_arm: Option<&CaptureArm>,
+    attempted_qqs: &HashSet<String>,
+    dismissed_qqs: &HashSet<String>,
+) -> bool {
+    if identities.len() != 1 {
+        return false;
+    }
+    let only_qq = &identities[0].qq_number;
+    match current_arm {
+        Some(arm) if arm.is_active() => {
+            arm.identity.qq_number != *only_qq && !dismissed_qqs.contains(only_qq)
+        }
+        Some(_) => false,
+        None => !attempted_qqs.contains(only_qq) && !dismissed_qqs.contains(only_qq),
+    }
+}
+
+fn next_single_window_candidate(
+    identities: &[LocalQqIdentity],
+    attempted_qqs: &HashSet<String>,
+    dismissed_qqs: &HashSet<String>,
+    skip_attempted: bool,
+) -> Option<LocalQqIdentity> {
+    if identities.len() != 1 {
+        return None;
+    }
+    let candidate = &identities[0];
+    if dismissed_qqs.contains(&candidate.qq_number) {
+        return None;
+    }
+    if skip_attempted && attempted_qqs.contains(&candidate.qq_number) {
+        return None;
+    }
+    Some(candidate.clone())
 }
 
 fn emit_status(app: &AppHandle, runtime: &mut RuntimeState, mut status: StatusPayload) {
     status.session_active = runtime.cancellation.is_some();
-    if status.target_qq.is_none() {
-        status.target_qq = if ACCOUNT_PHASES.contains(&status.phase) {
-            runtime
-                .capture_target
-                .clone()
-                .or_else(|| runtime.selected_qq_number.clone())
-        } else if status.phase == "error" {
-            // 只有拦截后的失败属于某个账号；启动阶段的失败不归到任何账号。
-            runtime.capture_target.clone()
-        } else {
-            None
-        };
+    let protocol_session = runtime
+        .protocol_session
+        .as_ref()
+        .filter(|_| status.session_active);
+    status.protocol_mode = protocol_session.is_some();
+    status.proxy_port = status.session_active.then_some(runtime.proxy_port);
+    if let Some(session) = protocol_session {
+        status = status.with_capture_directory(session.directory());
     }
+    status.armed_qq = if status.session_active && !status.protocol_mode {
+        runtime
+            .current_arm
+            .as_ref()
+            .filter(|arm| arm.is_active())
+            .map(|arm| arm.identity.qq_number.clone())
+    } else {
+        None
+    };
     runtime.status = status.clone();
     let _ = app.emit("capture-status", status);
 }
 
-/// 已拦截登录但结果尚未发布时禁止切换账号，否则 Code 会被记到新选的账号上。
-fn capture_in_progress(phase: &str, armed: &AtomicBool) -> bool {
-    matches!(phase, "code_captured" | "syncing")
-        || (phase == "waiting_login" && !armed.load(Ordering::SeqCst))
+fn idle_status(protocol_mode: bool) -> StatusPayload {
+    if protocol_mode {
+        StatusPayload::new(
+            "idle",
+            "协议模式待启动",
+            "点击“启动协议监听”，再打开 QQ 农场。",
+            false,
+        )
+    } else {
+        StatusPayload::idle()
+    }
 }
 
 fn ready_status() -> StatusPayload {
@@ -1034,31 +1361,6 @@ async fn detect_selected_qq_with_retry(
         }
     }
     Err(last_error)
-}
-
-fn choose_waiting_identity(
-    identities: &[LocalQqIdentity],
-    selected_qq_number: Option<&str>,
-) -> Result<LocalQqIdentity, String> {
-    if identities.is_empty() {
-        return Err("未检测到可确认的 Windows QQ 账号".to_owned());
-    }
-    if let Some(selected_qq_number) = selected_qq_number {
-        return identities
-            .iter()
-            .find(|identity| identity.qq_number == selected_qq_number)
-            .cloned()
-            .ok_or_else(|| {
-                format!("所选 QQ {selected_qq_number} 已不在当前登录窗口中，请重新选择")
-            });
-    }
-    if identities.len() == 1 {
-        return Ok(identities[0].clone());
-    }
-    Err(format!(
-        "检测到 {} 个 Windows QQ 账号，请选择右侧下拉列表中的本次登录账号",
-        identities.len()
-    ))
 }
 
 fn friend_gids_without_self(captured_gids: &[String], own_gid: &str) -> Vec<String> {
@@ -1134,27 +1436,6 @@ mod tests {
     }
 
     #[test]
-    fn waiting_identity_lock_adopts_a_stable_account_switch() {
-        let mut locked = Some(identity("1343475483", "芜"));
-        let next = identity("3170105001", "落");
-        let (changed, previous) = replace_locked_identity(&mut locked, &next);
-
-        assert!(changed);
-        assert_eq!(previous.as_deref(), Some("1343475483"));
-        assert_eq!(locked.unwrap().qq_number, "3170105001");
-    }
-
-    #[test]
-    fn waiting_identity_lock_refreshes_without_reporting_a_switch() {
-        let mut locked = Some(identity("3170105001", "落"));
-        let refreshed = identity("3170105001", "落");
-        let (changed, previous) = replace_locked_identity(&mut locked, &refreshed);
-
-        assert!(!changed);
-        assert_eq!(previous.as_deref(), Some("3170105001"));
-    }
-
-    #[test]
     fn waiting_copy_names_the_account_and_next_step() {
         let detail = waiting_login_detail(&identity("3170105001", "落"), capture_hint(true, false));
 
@@ -1162,19 +1443,6 @@ mod tests {
             detail,
             "QQ 3170105001（落）\n在这个 QQ 里打开农场；获取 Code 后自动同步"
         );
-    }
-
-    #[test]
-    fn switching_accounts_is_blocked_while_a_login_is_being_processed() {
-        let armed = AtomicBool::new(true);
-        assert!(!capture_in_progress("waiting_login", &armed));
-        assert!(!capture_in_progress("completed", &armed));
-        assert!(capture_in_progress("syncing", &armed));
-
-        armed.store(false, Ordering::SeqCst);
-        assert!(capture_in_progress("waiting_login", &armed));
-        assert!(!capture_in_progress("ready", &armed));
-        assert!(!capture_in_progress("error", &armed));
     }
 
     #[test]
@@ -1218,36 +1486,74 @@ mod tests {
     }
 
     #[test]
-    fn one_visible_account_is_selected_automatically() {
-        let candidates = vec![identity("3170105001", "账号一")];
+    fn capture_arm_allows_pipelined_switch_while_previous_account_is_syncing() {
+        let (sender, _receiver) = mpsc::channel(4);
+        let arm_a = CaptureArm::new(identity("1343475483", "账号一"));
+        let controller = ProxyController::new(ActiveProxyMode::CaptureCode {
+            captured: sender,
+            arm: Some(arm_a.clone()),
+            capture_friend_gids: false,
+            diagnostics_path: None,
+        });
 
-        let selected = choose_waiting_identity(&candidates, None).unwrap();
+        assert!(controller.claim_code(&arm_a, "synthetic-code-a"));
+        assert!(!arm_a.is_active());
+        assert!(controller.interception_mode().is_none());
 
-        assert_eq!(selected.qq_number, "3170105001");
+        let arm_b = CaptureArm::new(identity("3170105001", "账号二"));
+        controller.set_arm(Some(arm_b.clone())).unwrap();
+        assert!(arm_b.is_active());
+        assert!(controller.interception_mode().is_some());
+        assert!(controller.claim_code(&arm_b, "synthetic-code-b"));
+    }
+
+    #[tokio::test]
+    async fn codes_are_stored_and_cleared_per_qq_independently() {
+        let core = AppCore::new(std::env::temp_dir().join("qq-farm-codes-per-qq-test"));
+        core.set_code("100001", Some("code-a".to_owned())).await;
+        core.set_code("100002", Some("code-b".to_owned())).await;
+
+        assert_eq!(core.captured_code(Some("100001")).await.unwrap(), "code-a");
+        assert_eq!(core.captured_code(Some("100002")).await.unwrap(), "code-b");
+        assert_eq!(core.captured_code(None).await.unwrap(), "code-b");
+
+        core.set_code("100002", None).await;
+        assert!(core.captured_code(Some("100002")).await.is_err());
+        assert_eq!(core.captured_code(Some("100001")).await.unwrap(), "code-a");
+        assert_eq!(core.captured_code(None).await.unwrap(), "code-a");
     }
 
     #[test]
-    fn multiple_visible_accounts_require_an_explicit_selection() {
-        let candidates = vec![
-            identity("1343475483", "账号一"),
-            identity("3170105001", "账号二"),
-        ];
+    fn single_window_switch_candidate_follows_new_account_unless_dismissed() {
+        let qq1 = identity("100001", "账号一");
+        let qq2 = identity("100002", "账号二");
+        let mut attempted = HashSet::new();
+        let mut dismissed = HashSet::new();
 
-        let error = choose_waiting_identity(&candidates, None).unwrap_err();
+        // 单窗口切到新号 qq2，无论 qq2 之前是否在未触发前切走，只要未手动取消都可自动跟随
+        let candidate =
+            next_single_window_candidate(std::slice::from_ref(&qq2), &attempted, &dismissed, false);
+        assert_eq!(candidate.unwrap().qq_number, "100002");
 
-        assert!(error.contains("请选择"));
-    }
+        // 多窗口时不自动猜测布防
+        assert!(
+            next_single_window_candidate(
+                &[qq1.clone(), qq2.clone()],
+                &attempted,
+                &dismissed,
+                true,
+            )
+            .is_none()
+        );
 
-    #[test]
-    fn multiple_visible_accounts_use_the_selected_qq_number() {
-        let candidates = vec![
-            identity("1343475483", "账号一"),
-            identity("3170105001", "账号二"),
-        ];
-
-        let selected = choose_waiting_identity(&candidates, Some("3170105001")).unwrap();
-
-        assert_eq!(selected.nickname, "账号二");
+        // 已尝试过的单窗口账号不自动重复布防；已取消的不自动恢复布防
+        attempted.insert("100001".to_owned());
+        assert!(
+            next_single_window_candidate(std::slice::from_ref(&qq1), &attempted, &dismissed, true,)
+                .is_none()
+        );
+        dismissed.insert("100002".to_owned());
+        assert!(next_single_window_candidate(&[qq2], &attempted, &dismissed, false).is_none());
     }
 
     #[test]

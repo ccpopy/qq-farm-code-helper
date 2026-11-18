@@ -24,7 +24,7 @@
         <h1>Code 获取助手</h1>
         <p class="brand-subtitle">从 Windows QQ 获取农场登录 Code</p>
       </div>
-      <button class="version-chip" id="versionChip" type="button" aria-label="应用版本">v0.2.8</button>
+      <button class="version-chip" id="versionChip" type="button" aria-label="应用版本">v0.2.9</button>
     </div>
   </header>
 
@@ -82,7 +82,7 @@
             <strong id="plotEmptyTitle">正在读取 Windows QQ</strong>
             <p id="plotEmptyDetail">登录后的 QQ 会自动出现在这里。</p>
           </div>
-          <p class="accounts-note">可先启动代理，也可直接点账号同步；只在代理未启动时安装临时证书，之后切换账号无需重复授权，点“停止并恢复网络”结束。</p>
+          <p class="accounts-note">启动代理后将持续复用同一网络会话：单账号切号自动准备同步，多账号可随时一键切换，完成后点“停止并恢复网络”结束。</p>
         </section>
 
         <section class="card settings-card reveal reveal-4" id="settingsCard">
@@ -149,7 +149,7 @@
             </span>
             <div>
               <strong>协议模式</strong>
-              <p>启动后显示代理端口和日志目录。</p>
+              <p id="protocolModeNoticeCopy">启动后显示代理端口和日志目录。</p>
             </div>
           </div>
 
@@ -168,7 +168,7 @@
                 <p class="section-label">APP UPDATE</p>
                 <h2 id="updateHeading">应用更新</h2>
               </div>
-              <span class="update-version" id="updateVersion">v0.2.8</span>
+              <span class="update-version" id="updateVersion">v0.2.9</span>
             </div>
             <p class="update-status" id="updateStatus" aria-live="polite">启动后自动检查 GitHub Release，也可以手动检查。</p>
             <p class="update-target" id="updateTarget">更新会保留当前程序所在目录。</p>

@@ -1,6 +1,6 @@
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, sync::Mutex};
 use url::Url;
 
 const KEYRING_SERVICE: &str = "qq-farm-code-helper";
@@ -45,16 +45,34 @@ pub struct SettingsView {
 
 pub struct SettingsStore {
     path: PathBuf,
+    access: Mutex<()>,
 }
 
 impl SettingsStore {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
             path: data_dir.join("settings.json"),
+            access: Mutex::new(()),
         }
     }
 
     pub fn load(&self) -> Result<AppSettings, String> {
+        let _access = self.access.lock().expect("settings lock poisoned");
+        self.read_settings()
+    }
+
+    pub fn load_for_sync(&self) -> Result<(AppSettings, Option<String>), String> {
+        let _access = self.access.lock().expect("settings lock poisoned");
+        let settings = self.read_settings()?;
+        let token = if settings.auto_sync {
+            self.token()?
+        } else {
+            None
+        };
+        Ok((settings, token))
+    }
+
+    fn read_settings(&self) -> Result<AppSettings, String> {
         if !self.path.exists() {
             return Ok(AppSettings::default());
         }
@@ -71,6 +89,7 @@ impl SettingsStore {
         mut settings: AppSettings,
         token: Option<String>,
     ) -> Result<SettingsView, String> {
+        let _access = self.access.lock().expect("settings lock poisoned");
         normalize_settings(&mut settings)?;
         if let Some(token) = token {
             let token = token.trim();
@@ -83,7 +102,8 @@ impl SettingsStore {
     }
 
     pub fn view(&self) -> Result<SettingsView, String> {
-        self.view_with(self.load()?)
+        let _access = self.access.lock().expect("settings lock poisoned");
+        self.view_with(self.read_settings()?)
     }
 
     pub fn token(&self) -> Result<Option<String>, String> {
@@ -96,7 +116,8 @@ impl SettingsStore {
     }
 
     pub fn set_update_proxy(&self, enabled: bool, proxy_url: &str) -> Result<String, String> {
-        let mut settings = self.load()?;
+        let _access = self.access.lock().expect("settings lock poisoned");
+        let mut settings = self.read_settings()?;
         let normalized = normalize_update_proxy_url(proxy_url);
         settings.update_proxy_url = if enabled {
             normalized?
@@ -107,6 +128,29 @@ impl SettingsStore {
         settings.update_proxy = enabled;
         write_settings_atomic(&self.path, &settings)?;
         Ok(settings.update_proxy_url)
+    }
+
+    pub fn set_protocol_capture(&self, enabled: bool) -> Result<SettingsView, String> {
+        let _access = self.access.lock().expect("settings lock poisoned");
+        let mut settings = self.read_settings()?;
+        settings.protocol_capture = enabled;
+        let view = self.view_with(settings)?;
+        write_settings_atomic(&self.path, &view.settings)?;
+        Ok(view)
+    }
+
+    pub fn set_sync_options(
+        &self,
+        auto_sync: bool,
+        sync_official_friends: bool,
+    ) -> Result<SettingsView, String> {
+        let _access = self.access.lock().expect("settings lock poisoned");
+        let mut settings = self.read_settings()?;
+        settings.auto_sync = auto_sync;
+        settings.sync_official_friends = sync_official_friends;
+        let view = self.view_with(settings)?;
+        write_settings_atomic(&self.path, &view.settings)?;
+        Ok(view)
     }
 
     fn view_with(&self, settings: AppSettings) -> Result<SettingsView, String> {
@@ -303,5 +347,37 @@ mod tests {
                 "accepted {value}"
             );
         }
+    }
+
+    #[test]
+    fn saves_protocol_capture_and_sync_options_without_overwriting_other_settings() {
+        let directory = std::env::temp_dir().join(format!(
+            "qq-farm-code-helper-options-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let store = SettingsStore::new(directory.clone());
+        let settings = AppSettings {
+            server_url: "https://farm.example.com".to_owned(),
+            proxy_port: 9988,
+            ..AppSettings::default()
+        };
+        write_settings_atomic(&store.path, &settings).unwrap();
+
+        let view = store.set_protocol_capture(true).unwrap();
+        assert!(view.settings.protocol_capture);
+        assert_eq!(view.settings.proxy_port, 9988);
+
+        let view = store.set_sync_options(false, true).unwrap();
+        assert!(!view.settings.auto_sync);
+        assert!(view.settings.sync_official_friends);
+        assert!(view.settings.protocol_capture);
+        assert_eq!(view.settings.server_url, "https://farm.example.com");
+
+        fs::remove_dir_all(directory).unwrap();
     }
 }

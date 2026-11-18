@@ -2,17 +2,23 @@ use crate::qq_login_history::{ObservedQqAccount, QqLoginHistory};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
 };
 use url::Url;
 
 const STABLE_DETECTION_TIMEOUT: Duration = Duration::from_secs(2);
+const FAST_DETECTION_TIMEOUT: Duration = Duration::from_millis(1500);
+const DETECT_CACHE_TTL: Duration = Duration::from_millis(180);
 
-#[derive(Debug, Clone, Serialize)]
+type DetectCacheEntry = (Instant, Vec<LocalQqIdentity>);
+
+static DETECT_CACHE: OnceLock<tokio::sync::Mutex<Option<DetectCacheEntry>>> = OnceLock::new();
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalQqIdentity {
     pub qq_number: String,
@@ -51,6 +57,19 @@ pub async fn detect_selected_stable_async(
         .ok_or_else(|| format!("当前 QQ 主窗口中未找到所选账号 {qq_number}，请重新选择"))
 }
 
+pub async fn detect_selected_fast_async(
+    history: Arc<QqLoginHistory>,
+    qq_number: &str,
+) -> Result<LocalQqIdentity, String> {
+    let identities = tokio::time::timeout(FAST_DETECTION_TIMEOUT, detect_all_async(history))
+        .await
+        .map_err(|_| "读取 QQ 主界面超时，请稍后重试".to_owned())??;
+    identities
+        .into_iter()
+        .find(|identity| identity.qq_number == qq_number)
+        .ok_or_else(|| format!("当前 QQ 主窗口中未找到所选账号 {qq_number}，请重新选择"))
+}
+
 async fn detect_stable_all_async_inner(
     history: Arc<QqLoginHistory>,
 ) -> Result<Vec<LocalQqIdentity>, String> {
@@ -60,36 +79,50 @@ async fn detect_stable_all_async_inner(
     confirm_stable_identities(first, second)
 }
 
-async fn detect_all_async(history: Arc<QqLoginHistory>) -> Result<Vec<LocalQqIdentity>, String> {
-    tokio::task::spawn_blocking(move || detect_all(&history))
+pub(crate) async fn detect_all_async(
+    history: Arc<QqLoginHistory>,
+) -> Result<Vec<LocalQqIdentity>, String> {
+    let cache = DETECT_CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
+    let mut guard = cache.lock().await;
+    if let Some((captured_at, cached)) = guard.as_ref()
+        && captured_at.elapsed() < DETECT_CACHE_TTL
+    {
+        return Ok(cached.clone());
+    }
+    let identities = tokio::task::spawn_blocking(move || detect_all(&history))
         .await
-        .map_err(|error| format!("QQ 身份检测任务异常结束: {error}"))?
+        .map_err(|error| format!("QQ 身份检测任务异常结束: {error}"))??;
+    *guard = Some((Instant::now(), identities.clone()));
+    Ok(identities)
 }
 
 fn confirm_stable_identities(
     first: Vec<LocalQqIdentity>,
-    mut second: Vec<LocalQqIdentity>,
+    second: Vec<LocalQqIdentity>,
 ) -> Result<Vec<LocalQqIdentity>, String> {
+    let first_len = first.len();
+    let second_len = second.len();
     let first_keys = first
         .iter()
-        .map(|identity| (identity.qq_number.clone(), identity.nickname.clone()))
+        .map(|identity| (identity.qq_number.as_str(), identity.nickname.as_str()))
+        .collect::<HashSet<_>>();
+    let mut stable = second
+        .into_iter()
+        .filter(|identity| {
+            first_keys.contains(&(identity.qq_number.as_str(), identity.nickname.as_str()))
+        })
         .collect::<Vec<_>>();
-    let second_keys = second
-        .iter()
-        .map(|identity| (identity.qq_number.clone(), identity.nickname.clone()))
-        .collect::<Vec<_>>();
-    if first_keys != second_keys {
+    if stable.is_empty() {
         return Err(format!(
             "QQ 登录实例正在变化：连续两次检测到的账号数量为 {} / {}，请稍后重试",
-            first.len(),
-            second.len()
+            first_len, second_len
         ));
     }
-    for identity in &mut second {
+    for identity in &mut stable {
         identity.source = "qq_ui_stable_visible_accounts";
         identity.verification_detail = "QQ 主界面昵称 + 本机登录记录匹配 + 连续两次一致";
     }
-    Ok(second)
+    Ok(stable)
 }
 
 fn detect_all_from_qq_root(
@@ -372,6 +405,41 @@ mod tests {
             verification_detail: "test",
         };
         assert!(confirm_stable_identities(vec![first], vec![second]).is_err());
+    }
+
+    #[test]
+    fn keeps_stable_accounts_while_another_window_is_changing() {
+        let stable_a = LocalQqIdentity {
+            qq_number: "12345678".to_owned(),
+            nickname: "账号一".to_owned(),
+            avatar_url: String::new(),
+            source: "test",
+            verification_detail: "test",
+        };
+        let changing_b = LocalQqIdentity {
+            qq_number: "87654321".to_owned(),
+            nickname: "账号二".to_owned(),
+            avatar_url: String::new(),
+            source: "test",
+            verification_detail: "test",
+        };
+        let new_c = LocalQqIdentity {
+            qq_number: "13572468".to_owned(),
+            nickname: "账号三".to_owned(),
+            avatar_url: String::new(),
+            source: "test",
+            verification_detail: "test",
+        };
+
+        let result = confirm_stable_identities(
+            vec![stable_a.clone(), changing_b],
+            vec![stable_a.clone(), new_c],
+        )
+        .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].qq_number, stable_a.qq_number);
+        assert_eq!(result[0].source, "qq_ui_stable_visible_accounts");
     }
 
     #[test]

@@ -92,6 +92,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::get_bootstrap,
             commands::save_settings,
+            commands::save_sync_options,
+            commands::set_protocol_capture,
             commands::test_connection,
             commands::start_capture,
             commands::stop_capture,

@@ -30,12 +30,33 @@ pub async fn get_bootstrap(core: State<'_, Arc<AppCore>>) -> Result<BootstrapPay
 }
 
 #[tauri::command]
-pub fn save_settings(
+pub async fn save_settings(
     core: State<'_, Arc<AppCore>>,
+    app: AppHandle,
     settings: AppSettings,
     token: Option<String>,
 ) -> Result<SettingsView, String> {
-    core.save_settings(settings, token)
+    core.save_settings(&app, settings, token).await
+}
+
+#[tauri::command]
+pub async fn save_sync_options(
+    core: State<'_, Arc<AppCore>>,
+    app: AppHandle,
+    auto_sync: bool,
+    sync_official_friends: bool,
+) -> Result<SettingsView, String> {
+    core.save_sync_options(&app, auto_sync, sync_official_friends)
+        .await
+}
+
+#[tauri::command]
+pub async fn set_protocol_capture(
+    core: State<'_, Arc<AppCore>>,
+    app: AppHandle,
+    enabled: bool,
+) -> Result<SettingsView, String> {
+    core.set_protocol_capture(&app, enabled).await
 }
 
 #[tauri::command]
@@ -71,8 +92,11 @@ pub async fn cleanup_network(core: State<'_, Arc<AppCore>>, app: AppHandle) -> R
 }
 
 #[tauri::command]
-pub async fn get_captured_code(core: State<'_, Arc<AppCore>>) -> Result<String, String> {
-    core.captured_code().await
+pub async fn get_captured_code(
+    core: State<'_, Arc<AppCore>>,
+    qq_number: Option<String>,
+) -> Result<String, String> {
+    core.captured_code(qq_number.as_deref()).await
 }
 
 #[tauri::command]
@@ -97,8 +121,7 @@ pub async fn sync_account(
     if qq_number.is_empty() {
         return Err("请选择要同步的 QQ 账号".to_owned());
     }
-    let identity =
-        qq_identity::detect_selected_stable_async(core.login_history(), qq_number).await?;
+    let identity = qq_identity::detect_selected_fast_async(core.login_history(), qq_number).await?;
     core.inner().clone().sync_account(app, identity).await
 }
 
