@@ -383,19 +383,28 @@ public final class CaptureOverlay {
             context.startService(new Intent(context, CaptureVpnService.class).setAction("STOP"));
             message = "正在停止…"; refresh(); return;
         }
-        if (!AppState.settings.passthrough() && !new CertificateManager(context).exists()) {
-            message = "请先在应用内生成并安装证书"; refresh(); return;
-        }
-        // Consent is per-app and already granted for a repeat start; only a revoked grant needs the activity.
-        if (VpnService.prepare(context) != null) {
-            message = "请在助手中确认 VPN 授权";
-            context.startActivity(new Intent(context, MainActivity.class)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                    .putExtra("startVpn", true));
-            refresh(); return;
-        }
-        context.startForegroundService(new Intent(context, CaptureVpnService.class).setAction("START"));
-        message = ""; refresh();
+        busy = true; message = "正在检查…"; refresh();
+        CapturePlatform requestedPlatform = AppState.settings.capturePlatform();
+        AppState.IO.execute(() -> {
+            CaptureReadiness ready = CaptureReadiness.check(context);
+            main.post(() -> {
+                busy = false;
+                if (closed) return;
+                if (AppState.capturing || AppState.settings.capturePlatform() != requestedPlatform) {
+                    message = ""; refresh(); return;
+                }
+                boolean needsChecklist = ready.needsChecklist();
+                if (needsChecklist || VpnService.prepare(context) != null) {
+                    message = needsChecklist ? "已打开助手检查开始前准备" : "请在助手中确认 VPN 授权";
+                    context.startActivity(new Intent(context, MainActivity.class)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                            .putExtra("startVpn", true));
+                    refresh(); return;
+                }
+                context.startForegroundService(new Intent(context, CaptureVpnService.class).setAction("START"));
+                message = ""; refresh();
+            });
+        });
     }
 
     private boolean selectionCurrent() {

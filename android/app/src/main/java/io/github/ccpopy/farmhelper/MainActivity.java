@@ -9,8 +9,6 @@ import android.content.res.ColorStateList;
 import android.content.pm.PackageManager;
 import android.graphics.Rect;
 import android.graphics.Typeface;
-import android.net.ConnectivityManager;
-import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.net.VpnService;
 import android.os.Build;
@@ -36,6 +34,7 @@ import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
+import androidx.core.widget.NestedScrollView;
 import com.google.android.material.bottomnavigation.BottomNavigationView;
 import com.google.android.material.bottomsheet.BottomSheetDialog;
 import com.google.android.material.button.MaterialButton;
@@ -48,6 +47,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 public final class MainActivity extends AppCompatActivity {
     private Ui ui;
@@ -61,6 +61,12 @@ public final class MainActivity extends AppCompatActivity {
     private File verifiedUpdate;
     private boolean busy;
     private boolean requestingOverlay;
+    private BottomSheetDialog preflight;
+    private Runnable preflightRender;
+    private int preflightCheck;
+    private boolean checkingCapture;
+    /** The certificate file was saved this session, so the next step is installing it. */
+    private boolean certificateExported;
     private MaterialSwitch overlaySwitch;
     // Capture page
     private FrameLayout core;
@@ -138,9 +144,13 @@ public final class MainActivity extends AppCompatActivity {
             page = savedInstanceState.getInt("page", 1); wechatVpn = savedInstanceState.getBoolean("wechatVpn");
             handledCapture = savedInstanceState.getLong("handledCapture", -1);
             requestingOverlay = savedInstanceState.getBoolean("requestingOverlay");
+            certificateExported = savedInstanceState.getBoolean("certificateExported");
+            pendingExport = savedInstanceState.getString("pendingExport");
         }
         navigation.setSelectedItemId(navId(page)); showPage();
         handleIntent(getIntent());
+        if (savedInstanceState != null && savedInstanceState.getBoolean("preflightOpen"))
+            root.post(() -> readiness(this::preflightSheet));
     }
     @Override protected void onResume() {
         super.onResume(); AppState.appVisible = true; Ui.secure(getWindow()); AppState.listen(listener); syncMonitor(false); refresh();
@@ -153,12 +163,23 @@ public final class MainActivity extends AppCompatActivity {
         OverlayService.sync(this);
         AppState.changed();
         if (page == 2) loadAccounts();
+        if (preflightRender != null) preflightRender.run();
     }
     @Override protected void onPause() { AppState.appVisible = false; AppState.unlisten(listener); AppState.changed(); super.onPause(); }
-    @Override protected void onDestroy() { if (breathing != null) breathing.cancel(); super.onDestroy(); }
+    @Override protected void onDestroy() {
+        if (breathing != null) breathing.cancel();
+        if (preflight != null) {
+            preflight.setOnDismissListener(null);
+            preflight.dismiss();
+        }
+        super.onDestroy();
+    }
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putInt("page", page); state.putBoolean("wechatVpn", wechatVpn); state.putLong("handledCapture", handledCapture);
         state.putBoolean("requestingOverlay", requestingOverlay);
+        state.putBoolean("certificateExported", certificateExported);
+        state.putString("pendingExport", pendingExport);
+        state.putBoolean("preflightOpen", preflight != null);
         super.onSaveInstanceState(state);
     }
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); setIntent(intent); handleIntent(intent); }
@@ -223,10 +244,14 @@ public final class MainActivity extends AppCompatActivity {
         header("农场助手");
         segment = segmented(new String[]{"QQ", "微信"}, platform.ordinal(), which -> choosePlatform(CapturePlatform.values()[which]));
         ui.add(content, segment, 10);
-        if (!AppState.settings.hasServer())
-            banner("还没有添加服务器", "去添加", this::configureServer);
-        else if (!scan && !AppState.settings.passthrough() && !new CertificateManager(this).exists())
-            banner("首次使用需要安装证书", "安装", this::certificateSheet);
+        LinearLayout banners = ui.column(); ui.add(content, banners, 0);
+        if (scan) { if (!AppState.settings.hasServer()) banner(banners, "还没有添加服务器", "去添加", this::configureServer); }
+        else readiness(ready -> {
+            if (banners.getParent() == null) return;
+            if (!ready.generated() && !ready.passthrough()) banner(banners, "首次使用，先完成证书设置", "开始设置", () -> readiness(this::preflightSheet));
+            else if (!ready.certificateReady()) banner(banners, "证书还没安装到系统", "去安装", () -> readiness(this::preflightSheet));
+            else if (ready.servers() == 0) banner(banners, "还没有添加服务器", "去添加", this::configureServer);
+        });
 
         // The hero: one soft panel holding the single action of this screen.
         LinearLayout hero = ui.column(); hero.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -288,14 +313,14 @@ public final class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.gravity = Gravity.CENTER_HORIZONTAL;
         group.setLayoutParams(params); return group;
     }
-    private void banner(String title, String action, Runnable click) {
+    private void banner(LinearLayout parent, String title, String action, Runnable click) {
         LinearLayout box = ui.row(); box.setBackground(ui.shape(R.color.farm_amber_tint, 10));
         box.setPadding(ui.dp(16), ui.dp(8), ui.dp(8), ui.dp(8));
         TextView label = ui.text(title, 14, R.color.farm_amber); label.setTypeface(Ui.MEDIUM);
         box.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
         MaterialButton go = ui.button(box, action, Ui.Tone.TEXT, click);
         go.setBackgroundTintList(ColorStateList.valueOf(getColor(R.color.farm_card))); go.setTextColor(getColor(R.color.farm_amber));
-        ui.add(content, box, 10);
+        ui.add(parent, box, 10);
     }
     private void refreshCapture() {
         CapturePlatform platform = AppState.settings.capturePlatform();
@@ -376,34 +401,158 @@ public final class MainActivity extends AppCompatActivity {
         if (AppState.capturing) { message("请先停止 VPN 获取"); return; }
         startActivity(new Intent(this, WxLoginActivity.class));
     }
+    /** Starting checks first: when everything is ready it starts at once, otherwise it shows what is missing. */
     private void toggleVpn() {
         if (AppState.capturing) { startService(new Intent(this, CaptureVpnService.class).setAction("STOP")); return; }
-        if (!AppState.settings.passthrough() && !new CertificateManager(this).exists()) { certificateSheet(); return; }
-        String hint = networkCompatibilityHint();
-        if (!hint.isEmpty()) {
-            new MaterialAlertDialogBuilder(this).setTitle("WLAN 与移动数据同时开启")
-                    .setMessage(hint).setNegativeButton("取消", null).setPositiveButton("继续", (d, w) -> prepareVpn()).show();
-        } else prepareVpn();
+        if (preflight != null) return;
+        checkBeforeStart(ready -> {
+            if (page != 1 || preflight != null) return;
+            if (ready.needsChecklist()) preflightSheet(ready);
+            else prepareVpn();
+        });
+    }
+
+    // ---------------------------------------------------------------- 开始前准备
+    private void readiness(Consumer<CaptureReadiness> then) {
+        AppState.IO.execute(() -> {
+            CaptureReadiness ready = CaptureReadiness.check(this);
+            runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) then.accept(ready); });
+        });
+    }
+    private void checkBeforeStart(Consumer<CaptureReadiness> then) {
+        if (checkingCapture || AppState.capturing) return;
+        checkingCapture = true;
+        CapturePlatform requestedPlatform = AppState.settings.capturePlatform();
+        readiness(ready -> {
+            checkingCapture = false;
+            if (!AppState.capturing && AppState.settings.capturePlatform() == requestedPlatform) then.accept(ready);
+        });
+    }
+
+    private enum Step { DONE, CURRENT, TODO, ADVICE, SKIP }
+    /**
+     * A short checklist shown when something is missing. The step to do now is highlighted and
+     * carries its own button; returning from system settings re-checks automatically.
+     */
+    private void preflightSheet(CaptureReadiness initial) {
+        if (preflight != null) { preflightRender.run(); return; }
+        LinearLayout body = ui.column();
+        BottomSheetDialog sheet = sheet("开始前准备", body);
+        preflight = sheet;
+        preflightRender = () -> {
+            int check = ++preflightCheck;
+            readiness(ready -> { if (preflight == sheet && check == preflightCheck) renderPreflight(body, ready, sheet); });
+        };
+        renderPreflight(body, initial, sheet);
+        sheet.setOnDismissListener(d -> {
+            if (preflight == sheet) { preflight = null; preflightRender = null; }
+            if (page == 1 || page == 4) showPage();
+        });
+        sheet.show();
+    }
+    private void startFromPreflight(BottomSheetDialog sheet, boolean confirmedInstalled) {
+        checkBeforeStart(ready -> {
+            if (preflight != sheet) return;
+            if (ready.certificateReady() || confirmedInstalled && ready.generated()) {
+                sheet.dismiss();
+                prepareVpn();
+            } else preflightRender.run();
+        });
+    }
+    private void renderPreflight(LinearLayout body, CaptureReadiness ready, BottomSheetDialog sheet) {
+        body.removeAllViews();
+        int missing = ready.missingCertificateSteps();
+        String lead = missing > 0 ? "还差 " + missing + " 步就能开始获取" : "可以开始获取";
+        TextView summary = ui.text(lead, 14, missing > 0 ? R.color.farm_muted : R.color.farm_accent);
+        summary.setPadding(ui.dp(4), 0, 0, ui.dp(14)); body.addView(summary);
+
+        // ① 生成证书
+        if (ready.passthrough()) step(body, 1, Step.SKIP, "生成证书", "透传诊断不需要证书", false);
+        else if (ready.generated()) step(body, 1, Step.DONE, "生成证书", "已生成，只保存在这台手机上", false);
+        else {
+            LinearLayout actions = step(body, 1, Step.CURRENT, "生成证书", "只需一次，用来读取农场登录数据", false);
+            stepAction(actions, "生成证书", Ui.Tone.PRIMARY, () -> generateCertificate(() -> {
+                if (preflightRender != null) preflightRender.run();
+            }));
+        }
+        // ② 安装到系统
+        if (ready.passthrough()) step(body, 2, Step.SKIP, "安装到系统", "透传诊断不需要", false);
+        else if (!ready.generated()) step(body, 2, Step.TODO, "安装到系统", "生成证书后进行", false);
+        else if (ready.installed()) step(body, 2, Step.DONE, "安装到系统", "系统证书库已找到当前证书", false);
+        else {
+            LinearLayout actions = step(body, 2, Step.CURRENT, "安装到系统",
+                    certificateExported ? "在系统设置里依次打开：安全 › 加密与凭据 › 安装证书 › CA 证书，选择刚导出的文件。装好后回到这里。"
+                            : "先把证书文件保存到手机，再到系统设置里安装。", false);
+            if (!certificateExported) stepAction(actions, "导出证书文件", Ui.Tone.PRIMARY, () -> export("certificate"));
+            else {
+                stepAction(actions, "去系统安装", Ui.Tone.PRIMARY, () -> openSettings(new Intent(Settings.ACTION_SECURITY_SETTINGS)));
+                stepAction(actions, "重新导出", Ui.Tone.TEXT, () -> export("certificate"));
+            }
+        }
+        // ③ 服务器 (advice: capture works without one, pushing does not)
+        if (ready.servers() > 0) step(body, 3, Step.DONE, "服务器", "已添加 " + ready.servers() + " 个", false);
+        else {
+            LinearLayout actions = step(body, 3, Step.ADVICE, "服务器", "没有服务器也能获取，但获取后无法推送", false);
+            stepAction(actions, "去添加", Ui.Tone.TEXT, () -> { sheet.dismiss(); serverSheet(null); });
+        }
+        // ④ 网络 (advice)
+        if (ready.networkHint().isEmpty()) step(body, 4, Step.DONE, "网络", "未发现会影响获取的设置", true);
+        else {
+            LinearLayout actions = step(body, 4, Step.ADVICE, "网络", ready.networkHint(), true);
+            stepAction(actions, "打开网络设置", Ui.Tone.TEXT, () -> openSettings(new Intent(Settings.ACTION_WIRELESS_SETTINGS)));
+        }
+
+        View gap = new View(this); ui.add(body, gap, 12);
+        MaterialButton go = ui.button(body, "开始获取", Ui.Tone.PRIMARY, () -> startFromPreflight(sheet, false));
+        go.setEnabled(ready.certificateReady());
+        // Some systems hide user certificates from the check even when installed.
+        if (!ready.certificateReady() && ready.generated()) {
+            ui.button(body, "已安装但检测不到？仍然开始", Ui.Tone.TEXT, () -> startFromPreflight(sheet, true));
+        }
+    }
+    private void stepAction(LinearLayout parent, String label, Ui.Tone tone, Runnable action) {
+        MaterialButton button = ui.button(label, tone, action);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2);
+        params.topMargin = ui.dp(8);
+        parent.addView(button, params);
+    }
+    /** One checklist row: numbered marker joined by a rail, title, detail, and room for its buttons. */
+    private LinearLayout step(LinearLayout parent, int number, Step state, String title, String detail, boolean last) {
+        LinearLayout row = ui.row(); row.setGravity(Gravity.TOP);
+        LinearLayout rail = ui.column(); rail.setGravity(Gravity.CENTER_HORIZONTAL);
+        TextView marker = ui.text(state == Step.DONE ? "" : state == Step.ADVICE ? "!" : state == Step.SKIP ? "–" : String.valueOf(number), 13,
+                state == Step.CURRENT ? R.color.farm_on_accent : state == Step.ADVICE ? R.color.farm_amber : R.color.farm_muted);
+        marker.setTypeface(Ui.MEDIUM); marker.setGravity(Gravity.CENTER);
+        marker.setBackground(ui.oval(state == Step.CURRENT ? R.color.farm_accent : state == Step.DONE ? R.color.farm_tint
+                : state == Step.ADVICE ? R.color.farm_amber_tint : R.color.farm_line));
+        if (state == Step.DONE) {
+            android.graphics.drawable.Drawable check = androidx.appcompat.content.res.AppCompatResources.getDrawable(this, R.drawable.ic_check).mutate();
+            check.setTint(getColor(R.color.farm_accent)); check.setBounds(0, 0, ui.dp(16), ui.dp(16));
+            marker.setCompoundDrawables(check, null, null, null); marker.setPadding(ui.dp(6), 0, 0, 0);
+        }
+        rail.addView(marker, new LinearLayout.LayoutParams(ui.dp(28), ui.dp(28)));
+        if (!last) {
+            View line = new View(this); line.setBackgroundColor(getColor(state == Step.DONE ? R.color.farm_tint : R.color.farm_line));
+            LinearLayout.LayoutParams lineParams = new LinearLayout.LayoutParams(ui.dp(2), 0, 1);
+            lineParams.topMargin = ui.dp(4); lineParams.bottomMargin = ui.dp(4); rail.addView(line, lineParams);
+        }
+        row.addView(rail, new LinearLayout.LayoutParams(ui.dp(28), -1));
+        LinearLayout text = ui.column(); text.setPadding(ui.dp(14), ui.dp(3), 0, last ? 0 : ui.dp(18));
+        TextView name = ui.text(title, 15, state == Step.TODO || state == Step.SKIP ? R.color.farm_muted : R.color.farm_ink);
+        if (state == Step.CURRENT) name.setTypeface(Ui.MEDIUM);
+        text.addView(name);
+        TextView sub = ui.text(detail, 12.5f, state == Step.ADVICE ? R.color.farm_amber : R.color.farm_muted);
+        LinearLayout.LayoutParams subParams = new LinearLayout.LayoutParams(-1, -2); subParams.topMargin = ui.dp(2);
+        text.addView(sub, subParams);
+        LinearLayout actions = ui.column();
+        text.addView(actions, new LinearLayout.LayoutParams(-1, -2));
+        row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
+        parent.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        return actions;
     }
     private void prepareVpn() {
         Intent prepare = VpnService.prepare(this);
         if (prepare != null) startActivityForResult(prepare, 10); else startCapture();
-    }
-    private String networkCompatibilityHint() {
-        ConnectivityManager connectivity = getSystemService(ConnectivityManager.class);
-        if (connectivity == null) return "";
-        NetworkCapabilities active = connectivity.getNetworkCapabilities(connectivity.getActiveNetwork());
-        if (active == null || !active.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return "";
-        for (android.net.Network network : connectivity.getAllNetworks()) {
-            NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(network);
-            if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
-                    && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-                    && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)) {
-                return "若进入农场超时，请关闭移动数据或系统的“网络加速 / 双通道加速”后重试。";
-            }
-        }
-        return "";
     }
     private void startCapture() { startForegroundService(new Intent(this, CaptureVpnService.class).setAction("START")); }
 
@@ -1002,13 +1151,27 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     // ---------------------------------------------------------------- 证书与权限
+    private void generateCertificate(Runnable onGenerated) {
+        async("正在生成证书", () -> {
+            new CertificateManager(this).generate();
+            AppState.log("证书", "已生成本地 CA；私钥保留在 Android Keystore，尚未安装到系统");
+            runOnUiThread(() -> {
+                certificateExported = false;
+                onGenerated.run();
+            });
+        });
+    }
+
     private BottomSheetDialog sheet(String title, LinearLayout body) {
         BottomSheetDialog sheet = new BottomSheetDialog(this);
-        ScrollView scroller = new ScrollView(this);
+        NestedScrollView scroller = new NestedScrollView(this);
         LinearLayout frame = ui.column(); frame.setPadding(ui.dp(20), ui.dp(8), ui.dp(20), ui.dp(24));
         TextView heading = ui.strong(title, 20); heading.setPadding(ui.dp(4), 0, 0, ui.dp(12)); frame.addView(heading);
         frame.addView(body); scroller.addView(frame); sheet.setContentView(scroller);
         Ui.secure(sheet.getWindow());
+        // Open fully: a half-open sheet once hid the install buttons below the screen edge.
+        sheet.getBehavior().setState(com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED);
+        sheet.getBehavior().setSkipCollapsed(true);
         return sheet;
     }
     private void certificateSheet() {
@@ -1029,10 +1192,7 @@ public final class MainActivity extends AppCompatActivity {
                     sub.setTypeface(Typeface.MONOSPACE); sub.setTextIsSelectable(true);
                 }
                 View gap = new View(this); ui.add(body, gap, 12);
-                if (!exists) ui.button(body, "生成证书", Ui.Tone.PRIMARY, () -> async("正在生成证书", () -> {
-                    new CertificateManager(this).generate(); AppState.log("证书", "已生成本地 CA；私钥保留在 Android Keystore，尚未安装到系统");
-                    runOnUiThread(render[0]);
-                }));
+                if (!exists) ui.button(body, "生成证书", Ui.Tone.PRIMARY, () -> generateCertificate(render[0]));
                 else {
                     ui.button(body, "导出证书", visible ? Ui.Tone.TONAL : Ui.Tone.PRIMARY, () -> export("certificate"));
                     ui.button(body, "打开系统安装", Ui.Tone.TONAL, () -> openSettings(new Intent(Settings.ACTION_SECURITY_SETTINGS)));
@@ -1043,7 +1203,7 @@ public final class MainActivity extends AppCompatActivity {
                             .setNegativeButton("取消", null).setPositiveButton("删除", (d, w) -> async("正在删除", () -> {
                                 if (AppState.capturing) throw new IllegalStateException("请先停止获取");
                                 new CertificateManager(this).deleteLocal(); AppState.log("证书", "助手本地证书与私钥已删除，不可恢复；系统副本需手动移除");
-                                runOnUiThread(render[0]);
+                                runOnUiThread(() -> { certificateExported = false; render[0].run(); });
                             })).show());
                     ui.add(body, danger, 0);
                 }
@@ -1090,12 +1250,18 @@ public final class MainActivity extends AppCompatActivity {
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
         if (request == 10) { if (result == Activity.RESULT_OK) startCapture(); else message("未授权 VPN"); }
-        if (request == 12 && result == Activity.RESULT_OK && data != null && data.getData() != null && pendingExport != null) {
-            String type = pendingExport; pendingExport = null; Uri uri = data.getData();
+        if (request == 12) {
+            String type = pendingExport; pendingExport = null;
+            if (result != Activity.RESULT_OK || data == null || data.getData() == null || type == null) return;
+            Uri uri = data.getData();
             async("正在导出", () -> {
                 byte[] bytes = type.equals("certificate") ? new CertificateManager(this).export() : AppState.logText().getBytes(java.nio.charset.StandardCharsets.UTF_8);
                 try (var output = getContentResolver().openOutputStream(uri, "wt")) { if (output == null) throw new IllegalStateException("无法写入目标文件"); output.write(bytes); }
-                runOnUiThread(() -> message(type.equals("certificate") ? "证书已导出，请到系统设置安装" : "日志已导出"));
+                runOnUiThread(() -> {
+                    if (!type.equals("certificate")) { message("日志已导出"); return; }
+                    certificateExported = true; message("证书已保存，下一步去系统安装");
+                    if (preflightRender != null) preflightRender.run();
+                });
             });
         }
     }

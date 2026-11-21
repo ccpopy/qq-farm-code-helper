@@ -1,8 +1,8 @@
 # 农场助手 Android
 
 原生 Java / Material Components Android 应用，不依赖 Android Studio。
-当前正式版本为 `0.1.3`（`versionCode 1003`），支持 Android 10 及以上。
-[下载 Android 正式版](https://github.com/ccpopy/qq-farm-code-helper/releases/tag/android-v0.1.3)，
+当前正式版本为 `0.1.4`（`versionCode 1004`），支持 Android 10 及以上。
+[下载 Android 正式版](https://github.com/ccpopy/qq-farm-code-helper/releases/tag/android-v0.1.4)，
 使用说明及限制见下文和 [Android 更新日志](CHANGELOG.md)。
 
 ## 构建与覆盖安装
@@ -15,7 +15,7 @@
 ```powershell
 .\scripts\build-android.ps1 -JdkDirectory $env:JAVA_HOME -SdkDirectory $env:ANDROID_HOME
 .\scripts\build-android.ps1 -Install -DeviceSerial <已授权设备序列号> -AdbPath <adb路径>
-.\scripts\build-android.ps1 -Configuration Release -Version 0.1.3 -Bundle
+.\scripts\build-android.ps1 -Configuration Release -Version 0.1.4 -Bundle
 ```
 
 脚本验证固定的 hev-socks5-tunnel 2.19.1 AAR 的 SHA-256，并从固定提交和子模块构建
@@ -44,6 +44,9 @@ Gradle 校验私钥存在、证书指纹和包名，构建脚本再次检查 APK
 
 - 获取页顶部切换 QQ / 微信。QQ 使用中央按钮启动或停止 VPN 获取；微信默认是扫码登录，
   可改用实验性的 VPN 获取。缺少服务器配置或证书时页面顶部给出入口，证书在设置页“抓包证书”中管理。
+- 主界面和悬浮窗在开始获取前检查证书、服务器和网络，全部就绪时直接开始。有待处理项时打开“开始前准备”，
+  可按步骤生成、导出和安装证书，从系统设置返回后自动复查。服务器和网络提示不阻止开始。
+  系统检测不到已安装的证书时，可选择“已安装但检测不到？仍然开始”。底部面板默认完全展开，内容较多时可滚动。
 - 收到身份或好友数据后（或手动导入后）按设置自动比对服务器同平台账号：自身 GID 相同的账号提示“检测到已有账号”，
   其次提示上次推送的账号；否则由用户选择新增或覆盖已有账号。任何写入都需要用户确认。
   推送内容（Code、好友）和是否自动比对在设置页“推送”中开关，默认全部开启。推送 Code 后自动检查账号是否上线。
